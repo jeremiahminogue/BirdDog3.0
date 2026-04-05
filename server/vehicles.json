@@ -1,0 +1,552 @@
+[
+  {
+    "vehicleId": 3,
+    "description": "07 GMC SAVANA",
+    "vinLast4": "4262",
+    "licensePlate": "DXQ-085",
+    "cardDescription": "Vehicle 3",
+    "employeeNumber": null,
+    "comments": null,
+    "status": "available"
+  },
+  {
+    "vehicleId": 4,
+    "description": "07 GMC SAVANA",
+    "vinLast4": "7262",
+    "licensePlate": "DXQ-086",
+    "cardDescription": "Vehicle 4",
+    "employeeNumber": null,
+    "comments": null,
+    "status": "available"
+  },
+  {
+    "vehicleId": 6,
+    "description": "08 CHEV EX VAN",
+    "vinLast4": "7116",
+    "licensePlate": "UAQ-511",
+    "cardDescription": "Vehicle 6",
+    "employeeNumber": "621",
+    "comments": null,
+    "status": "assigned"
+  },
+  {
+    "vehicleId": 7,
+    "description": "08 CHEV EX VAN",
+    "vinLast4": "8514",
+    "licensePlate": "UAQ-752",
+    "cardDescription": "Vehicle 7",
+    "employeeNumber": "708",
+    "comments": null,
+    "status": "assigned"
+  },
+  {
+    "vehicleId": 8,
+    "description": "08 GMC SAVANA",
+    "vinLast4": "3152",
+    "licensePlate": "UAQ-754",
+    "cardDescription": "Vehicle 8",
+    "employeeNumber": "785",
+    "comments": "Solar",
+    "status": "assigned"
+  },
+  {
+    "vehicleId": 9,
+    "description": "08 GMC SAVANA",
+    "vinLast4": "3489",
+    "licensePlate": "UAQ-768",
+    "cardDescription": "Vehicle 9",
+    "employeeNumber": null,
+    "comments": null,
+    "status": "available"
+  },
+  {
+    "vehicleId": 11,
+    "description": "02 FORD E250",
+    "vinLast4": "9521",
+    "licensePlate": "UAQ-767",
+    "cardDescription": "Vehicle 11",
+    "employeeNumber": "0",
+    "comments": "Fab",
+    "status": "assigned"
+  },
+  {
+    "vehicleId": 18,
+    "description": "11 GMC TRK",
+    "vinLast4": "5865",
+    "licensePlate": "144-WPJ",
+    "cardDescription": "Vehicle 18",
+    "employeeNumber": "None",
+    "comments": "Using AMEX",
+    "status": "available"
+  },
+  {
+    "vehicleId": 21,
+    "description": "12 CHEV EX VAN",
+    "vinLast4": "5759",
+    "licensePlate": "ANXA90",
+    "cardDescription": "Vehicle 21",
+    "employeeNumber": null,
+    "comments": "Cargo Van at AVCF",
+    "status": "available"
+  },
+  {
+    "vehicleId": 31,
+    "description": "14 CHEV EX VAN",
+    "vinLast4": "4716",
+    "licensePlate": "392-QXT",
+    "cardDescription": "Vehicle 31",
+    "employeeNumber": "597",
+    "comments": null,
+    "status": "assigned"
+  },
+  {
+    "vehicleId": 32,
+    "description": "14 CHEV EX VAN",
+    "vinLast4": "7280",
+    "licensePlate": "393-QXT",
+    "cardDescription": "Vehicle 32",
+    "employeeNumber": "593",
+    "comments": null,
+    "status": "assigned"
+  },
+  {
+    "vehicleId": 33,
+    "description": "13 CHEV EX VAN",
+    "vinLast4": "9471",
+    "licensePlate": "394-QXT",
+    "cardDescription": "Vehicle 33",
+    "employeeNumber": "62",
+    "comments": null,
+    "status": "assigned"
+  },
+  {
+    "vehicleId": 35,
+    "description": "14 GMC VAN",
+    "vinLast4": "4488",
+    "licensePlate": "347-QXT",
+    "cardDescription": "Vehicle 35",
+    "employeeNumber": "778",
+    "comments": null,
+    "status": "assigned"
+  },
+  {
+    "vehicleId": 36,
+    "description": "14 GMC VAN",
+    "vinLast4": "4487",
+    "licensePlate": "349-QXT",
+    "cardDescription": "Vehicle 36",
+    "employeeNumber": "613",
+    "comments": null,
+    "status": "assigned"
+  },
+  {
+    "vehicleId": 37,
+    "description": "14 GMC VAN",
+    "vinLast4": "4444",
+    "licensePlate": "697-SQU",
+    "cardDescription": "Vehicle 37",
+    "employeeNumber": "693",
+    "comments": null,
+    "status": "assigned"
+  },
+  {
+    "vehicleId": 38,
+    "description": "14 GMC VAN",
+    "vinLast4": "4046",
+    "licensePlate": "345-QXT",
+    "cardDescription": "Vehicle 38",
+    "employeeNumber": "787",
+    "comments": "OPEN",
+    "status": "assigned"
+  },
+  {
+    "vehicleId": 39,
+    "description": "08 FORD VAN 250",
+    "vinLast4": "3752",
+    "licensePlate": "UAQ-231",
+    "cardDescription": "Vehicle 39",
+    "employeeNumber": "795",
+    "comments": null,
+    "status": "assigned"
+  },
+  {
+    "vehicleId": 40,
+    "description": "08 FORD VAN 25 0",
+    "vinLast4": "3753",
+    "licensePlate": "UAQ-753",
+    "cardDescription": "Vehicle 40",
+    "employeeNumber": null,
+    "comments": "Scrapped",
+    "status": "retired"
+  },
+  {
+    "vehicleId": 41,
+    "description": "08 FORD VAN 250",
+    "vinLast4": "6859",
+    "licensePlate": "UAQ-509",
+    "cardDescription": "Vehicle 41",
+    "employeeNumber": "765",
+    "comments": null,
+    "status": "assigned"
+  },
+  {
+    "vehicleId": 42,
+    "description": "07 CHEVY K25",
+    "vinLast4": "9584",
+    "licensePlate": "UAQ-232",
+    "cardDescription": "Vehicle 42",
+    "employeeNumber": null,
+    "comments": null,
+    "status": "available"
+  },
+  {
+    "vehicleId": 51,
+    "description": "18 FORD TRANSIT VAN",
+    "vinLast4": "8219",
+    "licensePlate": "CHP-957",
+    "cardDescription": "Vehicle 51",
+    "employeeNumber": "760",
+    "comments": null,
+    "status": "assigned"
+  },
+  {
+    "vehicleId": 52,
+    "description": "18 FORD TRANSIT VAN",
+    "vinLast4": "8218",
+    "licensePlate": "CHP-892",
+    "cardDescription": "Vehicle 52",
+    "employeeNumber": "614",
+    "comments": null,
+    "status": "assigned"
+  },
+  {
+    "vehicleId": 53,
+    "description": "18 FORD TRANSIT VAN",
+    "vinLast4": "9654",
+    "licensePlate": "CHP-893",
+    "cardDescription": "Vehicle 53",
+    "employeeNumber": "375",
+    "comments": null,
+    "status": "assigned"
+  },
+  {
+    "vehicleId": 54,
+    "description": "18 CHEVY EXPRS VAN",
+    "vinLast4": "6877",
+    "licensePlate": "CHP-894",
+    "cardDescription": "Vehicle 54",
+    "employeeNumber": "504",
+    "comments": null,
+    "status": "assigned"
+  },
+  {
+    "vehicleId": 55,
+    "description": "18 GMC SIERRA TRK",
+    "vinLast4": "2534",
+    "licensePlate": "CHP-895",
+    "cardDescription": "Vehicle 55",
+    "employeeNumber": "280",
+    "comments": "Using AMEX",
+    "status": "assigned"
+  },
+  {
+    "vehicleId": 56,
+    "description": "18 GMC SIERRA TRK",
+    "vinLast4": "430",
+    "licensePlate": "CHP-955",
+    "cardDescription": "Vehicle 56",
+    "employeeNumber": "659",
+    "comments": null,
+    "status": "assigned"
+  },
+  {
+    "vehicleId": 57,
+    "description": "18 GMC SIERRA TRK",
+    "vinLast4": "1442",
+    "licensePlate": "CHP-954",
+    "cardDescription": "Vehicle 57",
+    "employeeNumber": null,
+    "comments": "FAB SHOP",
+    "status": "available"
+  },
+  {
+    "vehicleId": 58,
+    "description": "18 GMC SIERRA TRK",
+    "vinLast4": "5242",
+    "licensePlate": "CHP-211",
+    "cardDescription": "Vehicle 58",
+    "employeeNumber": "766",
+    "comments": "FAB SHOP",
+    "status": "assigned"
+  },
+  {
+    "vehicleId": 59,
+    "description": "12 CHEV SILV 3500 TRK",
+    "vinLast4": "4694",
+    "licensePlate": "CHP-956",
+    "cardDescription": "Vehicle 59",
+    "employeeNumber": "605",
+    "comments": "UTILITY TRUCK",
+    "status": "assigned"
+  },
+  {
+    "vehicleId": 60,
+    "description": "16 DODGE RAM CREW",
+    "vinLast4": "6726",
+    "licensePlate": "CHP-210",
+    "cardDescription": "Vehicle 60",
+    "employeeNumber": null,
+    "comments": "FLATBED - Fab Shop",
+    "status": "available"
+  },
+  {
+    "vehicleId": 63,
+    "description": "03 FORD F250 TRK",
+    "vinLast4": "1420",
+    "licensePlate": "BWZ-479",
+    "cardDescription": "Vehicle 63",
+    "employeeNumber": null,
+    "comments": "SOLD",
+    "status": "retired"
+  },
+  {
+    "vehicleId": 69,
+    "description": "12 GMC 2500 TRK",
+    "vinLast4": "4757",
+    "licensePlate": "AVQ-064",
+    "cardDescription": "Vehicle 69",
+    "employeeNumber": null,
+    "comments": "Sold",
+    "status": "retired"
+  },
+  {
+    "vehicleId": 70,
+    "description": "97 GMC SIERRA",
+    "vinLast4": "7647",
+    "licensePlate": "BKT-U56",
+    "cardDescription": "Vehicle 70",
+    "employeeNumber": null,
+    "comments": "Fab Shop With Snow Plow",
+    "status": "available"
+  },
+  {
+    "vehicleId": 73,
+    "description": "21 Chevy Silverado 1500",
+    "vinLast4": "7884",
+    "licensePlate": "AVKB06",
+    "cardDescription": "Vehicle 73",
+    "employeeNumber": "610",
+    "comments": null,
+    "status": "assigned"
+  },
+  {
+    "vehicleId": 74,
+    "description": "21 RDX Acura",
+    "vinLast4": "5149",
+    "licensePlate": "AVKB08",
+    "cardDescription": "Vehicle 74",
+    "employeeNumber": null,
+    "comments": null,
+    "status": "available"
+  },
+  {
+    "vehicleId": 75,
+    "description": "21 Grand Jeep Cherokee",
+    "vinLast4": "2687",
+    "licensePlate": "DDNP67",
+    "cardDescription": "Vehicle 75",
+    "employeeNumber": "7",
+    "comments": null,
+    "status": "assigned"
+  },
+  {
+    "vehicleId": 76,
+    "description": "22 Toyota 4Runner",
+    "vinLast4": "9320",
+    "licensePlate": "AVJK88",
+    "cardDescription": "Vehicle 76",
+    "employeeNumber": "313",
+    "comments": null,
+    "status": "assigned"
+  },
+  {
+    "vehicleId": 77,
+    "description": "22 Ford F-250",
+    "vinLast4": "8036",
+    "licensePlate": "DVU-T71",
+    "cardDescription": "Vehicle 77",
+    "employeeNumber": "7",
+    "comments": null,
+    "status": "assigned"
+  },
+  {
+    "vehicleId": 78,
+    "description": "23 Lift / Load Trailer",
+    "vinLast4": "",
+    "licensePlate": "BNN-L59",
+    "cardDescription": "Vehicle 78",
+    "employeeNumber": null,
+    "comments": "Fab Shop",
+    "status": "available"
+  },
+  {
+    "vehicleId": 79,
+    "description": "2022 Ford Explorer",
+    "vinLast4": "7306",
+    "licensePlate": "DYIN31",
+    "cardDescription": "Vehicle 80",
+    "employeeNumber": "361",
+    "comments": null,
+    "status": "assigned"
+  },
+  {
+    "vehicleId": 88,
+    "description": "24 Ford F150 XLT",
+    "vinLast4": "7816",
+    "licensePlate": "FBL-U82",
+    "cardDescription": "Vehicle 88",
+    "employeeNumber": "335",
+    "comments": null,
+    "status": "assigned"
+  },
+  {
+    "vehicleId": 89,
+    "description": "24 Ford F150 XLT",
+    "vinLast4": "3428",
+    "licensePlate": "FBM-Q81",
+    "cardDescription": "Vehicle 89",
+    "employeeNumber": "244",
+    "comments": null,
+    "status": "assigned"
+  },
+  {
+    "vehicleId": 93,
+    "description": "19 Ford F450 (Grey)",
+    "vinLast4": "3183",
+    "licensePlate": "EVZ-U09",
+    "cardDescription": "Vehicle 93",
+    "employeeNumber": "7",
+    "comments": null,
+    "status": "assigned"
+  },
+  {
+    "vehicleId": 94,
+    "description": "24 FORD F-250",
+    "vinLast4": "",
+    "licensePlate": null,
+    "cardDescription": "Vehicle 94",
+    "employeeNumber": null,
+    "comments": "OPEN",
+    "status": "available"
+  },
+  {
+    "vehicleId": 95,
+    "description": "25 FORD TRANSIT VAN",
+    "vinLast4": "1889",
+    "licensePlate": "EKZ-I60",
+    "cardDescription": "Vehicle 95",
+    "employeeNumber": "145",
+    "comments": null,
+    "status": "assigned"
+  },
+  {
+    "vehicleId": 96,
+    "description": "25 FORD TRANSIT VAN",
+    "vinLast4": "4705",
+    "licensePlate": "EKZ-I61",
+    "cardDescription": "Vehicle 96",
+    "employeeNumber": "675",
+    "comments": null,
+    "status": "assigned"
+  },
+  {
+    "vehicleId": 97,
+    "description": "25 FORD TRANSIT VAN",
+    "vinLast4": "8000",
+    "licensePlate": "EKZ-I62",
+    "cardDescription": "Vehicle 97",
+    "employeeNumber": "360",
+    "comments": null,
+    "status": "assigned"
+  },
+  {
+    "vehicleId": 98,
+    "description": "25 FORD TRANSIT VAN",
+    "vinLast4": "1262",
+    "licensePlate": "EKZ-I63",
+    "cardDescription": "Vehicle 98",
+    "employeeNumber": "618",
+    "comments": null,
+    "status": "assigned"
+  },
+  {
+    "vehicleId": 99,
+    "description": "25 FORD TRANSIT VAN",
+    "vinLast4": "3073",
+    "licensePlate": "EKZ-I64",
+    "cardDescription": "Vehicle 99",
+    "employeeNumber": "663",
+    "comments": null,
+    "status": "assigned"
+  },
+  {
+    "vehicleId": 100,
+    "description": "25 FORD TRANSIT VAN",
+    "vinLast4": "4735",
+    "licensePlate": "EKZ-I65",
+    "cardDescription": "Vehicle 100",
+    "employeeNumber": "509",
+    "comments": null,
+    "status": "assigned"
+  },
+  {
+    "vehicleId": 101,
+    "description": "25 FORD TRANSIT VAN",
+    "vinLast4": "7884",
+    "licensePlate": "EKZ-I66",
+    "cardDescription": "Vehicle 101",
+    "employeeNumber": null,
+    "comments": "Open",
+    "status": "available"
+  },
+  {
+    "vehicleId": 102,
+    "description": "25 FORD TRANSIT VAN",
+    "vinLast4": "7207",
+    "licensePlate": "EKZ-I67",
+    "cardDescription": "Vehicle 102",
+    "employeeNumber": null,
+    "comments": "Open",
+    "status": "available"
+  },
+  {
+    "vehicleId": 103,
+    "description": "25 FORD F-150",
+    "vinLast4": "1433",
+    "licensePlate": "FOZE92",
+    "cardDescription": "Vehicle 103",
+    "employeeNumber": "128",
+    "comments": null,
+    "status": "assigned"
+  },
+  {
+    "vehicleId": 104,
+    "description": "25 FORD F-150",
+    "vinLast4": "1450",
+    "licensePlate": null,
+    "cardDescription": "Vehicle 104",
+    "employeeNumber": "317",
+    "comments": null,
+    "status": "assigned"
+  },
+  {
+    "vehicleId": 105,
+    "description": "26 FORD SUPER DUTY F-350",
+    "vinLast4": "2613",
+    "licensePlate": "ELAK22",
+    "cardDescription": "Vehicle 105",
+    "employeeNumber": null,
+    "comments": "FAB SHOP",
+    "status": "available"
+  }
+]

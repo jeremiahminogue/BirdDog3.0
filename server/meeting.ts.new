@@ -1,0 +1,292 @@
+import { Hono } from "hono";
+import { db } from "./db.js";
+import {
+  actionItems, jobTemplates, templateItems, jobs, settings
+} from "../shared/schema.js";
+import { eq, and, sql, desc, asc } from "drizzle-orm";
+import { requireAuth, requireRole } from "./auth.js";
+import { getCompanyId } from "./tenant.js";
+
+const meeting = new Hono();
+meeting.use("/*", requireAuth);
+
+// ── Action Items CRUD ──────────────────────────────────────────
+
+// Get items for a job
+meeting.get("/items", async (c) => {
+  const jobId = parseInt(c.req.query("jobId") || "0");
+  const status = c.req.query("status"); // "open", "done", or omit for all
+  if (!jobId) return c.json({ error: "jobId required" }, 400);
+
+  const companyId = getCompanyId(c);
+  const conditions = [eq(actionItems.jobId, jobId), eq(actionItems.companyId, companyId)];
+  if (status === "open" || status === "done") {
+    conditions.push(eq(actionItems.status, status));
+  }
+
+  const rows = await db
+    .select()
+    .from(actionItems)
+    .where(and(...conditions))
+    .orderBy(actionItems.status, asc(actionItems.sortOrder), desc(actionItems.createdAt));
+
+  return c.json(rows);
+});
+
+// Create item
+meeting.post("/items", requireRole("admin", "pm"), async (c) => {
+  const data = await c.req.json();
+  const companyId = getCompanyId(c);
+  const [row] = await db.insert(actionItems).values({
+    jobId: data.jobId,
+    description: data.description,
+    assignedTo: data.assignedTo || null,
+    priority: data.priority || "normal",
+    dueDate: data.dueDate || null,
+    notes: data.notes || null,
+    createdBy: data.createdBy || null,
+    companyId,
+  }).returning();
+  return c.json(row, 201);
+});
+
+// Update item (edit, toggle status, add notes)
+meeting.put("/items/:id", requireRole("admin", "pm"), async (c) => {
+  const id = parseInt(c.req.param("id"));
+  const companyId = getCompanyId(c);
+  const data = await c.req.json();
+  data.updatedAt = new Date().toISOString();
+
+  // If marking done, set completedAt
+  if (data.status === "done" && !data.completedAt) {
+    data.completedAt = new Date().toISOString();
+  }
+  if (data.status === "open") {
+    data.completedAt = null;
+  }
+
+  const [row] = await db.update(actionItems).set(data).where(and(eq(actionItems.id, id), eq(actionItems.companyId, companyId))).returning();
+  return c.json(row);
+});
+
+// Delete item
+meeting.delete("/items/:id", requireRole("admin", "pm"), async (c) => {
+  const id = parseInt(c.req.param("id"));
+  const companyId = getCompanyId(c);
+  await db.delete(actionItems).where(and(eq(actionItems.id, id), eq(actionItems.companyId, companyId)));
+  return c.json({ ok: true });
+});
+
+// Quick toggle status
+meeting.patch("/items/:id/toggle", requireRole("admin", "pm"), async (c) => {
+  const id = parseInt(c.req.param("id"));
+  const companyId = getCompanyId(c);
+  const [existing] = await db.select().from(actionItems).where(and(eq(actionItems.id, id), eq(actionItems.companyId, companyId))).limit(1);
+  if (!existing) return c.json({ error: "Not found" }, 404);
+
+  const newStatus = existing.status === "open" ? "done" : "open";
+  const [row] = await db.update(actionItems).set({
+    status: newStatus,
+    completedAt: newStatus === "done" ? new Date().toISOString() : null,
+    updatedAt: new Date().toISOString(),
+  }).where(and(eq(actionItems.id, id), eq(actionItems.companyId, companyId))).returning();
+  return c.json(row);
+});
+
+// ── Templates ──────────────────────────────────────────────────
+
+meeting.get("/templates", async (c) => {
+  const companyId = getCompanyId(c);
+  const rows = await db.select().from(jobTemplates).where(eq(jobTemplates.companyId, companyId)).orderBy(jobTemplates.name);
+  return c.json(rows);
+});
+
+meeting.get("/templates/:id/items", async (c) => {
+  const id = parseInt(c.req.param("id"));
+  const rows = await db.select().from(templateItems)
+    .where(eq(templateItems.templateId, id))
+    .orderBy(asc(templateItems.sortOrder));
+  return c.json(rows);
+});
+
+meeting.post("/templates", requireRole("admin", "pm"), async (c) => {
+  const data = await c.req.json();
+  const companyId = getCompanyId(c);
+  const [row] = await db.insert(jobTemplates).values({
+    name: data.name,
+    description: data.description || null,
+    companyId,
+  }).returning();
+  return c.json(row, 201);
+});
+
+meeting.post("/templates/:id/items", requireRole("admin", "pm"), async (c) => {
+  const templateId = parseInt(c.req.param("id"));
+  const data = await c.req.json();
+  const [row] = await db.insert(templateItems).values({
+    templateId,
+    description: data.description,
+    assignedTo: data.assignedTo || null,
+    priority: data.priority || "normal",
+    sortOrder: data.sortOrder || 0,
+  }).returning();
+  return c.json(row, 201);
+});
+
+meeting.delete("/templates/:id", requireRole("admin"), async (c) => {
+  const id = parseInt(c.req.param("id"));
+  const companyId = getCompanyId(c);
+  await db.delete(templateItems).where(eq(templateItems.templateId, id));
+  await db.delete(jobTemplates).where(and(eq(jobTemplates.id, id), eq(jobTemplates.companyId, companyId)));
+  return c.json({ ok: true });
+});
+
+// ── Apply template to a job (seed action items) ────────────────
+
+meeting.post("/apply-template", requireRole("admin", "pm"), async (c) => {
+  const { jobId, templateId } = await c.req.json();
+  const companyId = getCompanyId(c);
+  const items = await db.select().from(templateItems)
+    .where(eq(templateItems.templateId, templateId))
+    .orderBy(asc(templateItems.sortOrder));
+
+  const created = [];
+  for (const item of items) {
+    const [row] = await db.insert(actionItems).values({
+      jobId,
+      description: item.description,
+      assignedTo: item.assignedTo,
+      priority: item.priority,
+      sortOrder: item.sortOrder,
+      companyId,
+    }).returning();
+    created.push(row);
+  }
+  return c.json({ count: created.length, items: created });
+});
+
+// ── Meeting Snapshot (HTML report) ─────────────────────────────
+
+meeting.get("/snapshot", async (c) => {
+  const jobId = parseInt(c.req.query("jobId") || "0");
+  if (!jobId) return c.json({ error: "jobId required" }, 400);
+
+  const companyId = getCompanyId(c);
+  const [job] = await db.select().from(jobs).where(and(eq(jobs.id, jobId), eq(jobs.companyId, companyId))).limit(1);
+  if (!job) return c.json({ error: "Job not found" }, 404);
+
+  const settingsRows = await db.select().from(settings).where(eq(settings.companyId, companyId));
+  const settingsMap: Record<string, string> = {};
+  for (const r of settingsRows) settingsMap[r.key] = r.value;
+  const company = settingsMap.companyName || "BirdDog";
+
+  const items = await db.select().from(actionItems)
+    .where(and(eq(actionItems.jobId, jobId), eq(actionItems.companyId, companyId)))
+    .orderBy(actionItems.status, asc(actionItems.sortOrder), desc(actionItems.createdAt));
+
+  const openItems = items.filter(i => i.status === "open");
+  const doneItems = items.filter(i => i.status === "done");
+
+  // Group open items by assignee
+  const byAssignee = new Map<string, typeof openItems>();
+  for (const item of openItems) {
+    const key = item.assignedTo || "Unassigned";
+    const arr = byAssignee.get(key) || [];
+    arr.push(item);
+    byAssignee.set(key, arr);
+  }
+
+  const now = new Date();
+  const dateStr = now.toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
+
+  const priorityBadge = (p: string) => {
+    const colors: Record<string, string> = { urgent: "#dc2626", high: "#ea580c", normal: "#2563eb", low: "#6b7280" };
+    return `<span style="display:inline-block;padding:1px 6px;border-radius:3px;font-size:9px;font-weight:600;color:#fff;background:${colors[p] || colors.normal}">${p.toUpperCase()}</span>`;
+  };
+
+  const fmtDue = (d: string | null) => {
+    if (!d) return "";
+    const due = new Date(d + "T12:00:00");
+    const diff = Math.ceil((due.getTime() - now.getTime()) / 86400000);
+    const label = due.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+    if (diff < 0) return `<span style="color:#dc2626;font-weight:600">${label} (OVERDUE)</span>`;
+    if (diff <= 3) return `<span style="color:#ea580c">${label}</span>`;
+    return label;
+  };
+
+  let assigneeSections = "";
+  for (const [assignee, assigneeItems] of [...byAssignee.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+    const rows = assigneeItems.map(item => `<tr>
+      <td style="padding:4px 8px">${priorityBadge(item.priority)}</td>
+      <td style="padding:4px 8px">${item.description}</td>
+      <td style="padding:4px 8px">${fmtDue(item.dueDate)}</td>
+      <td style="padding:4px 8px;font-size:10px;color:#888">${item.notes || ""}</td>
+    </tr>`).join("\n");
+
+    assigneeSections += `
+      <h3 style="font-size:13px;font-weight:600;color:#1d5191;margin:16px 0 6px;padding-bottom:3px;border-bottom:1px solid #eee">${assignee} <span style="font-weight:400;color:#999">(${assigneeItems.length})</span></h3>
+      <table style="width:100%;border-collapse:collapse;margin-bottom:8px">
+        <thead><tr style="background:#f5f7fa">
+          <th style="padding:4px 8px;text-align:left;font-size:9px;text-transform:uppercase;color:#666;border-bottom:2px solid #ddd;width:70px">Priority</th>
+          <th style="padding:4px 8px;text-align:left;font-size:9px;text-transform:uppercase;color:#666;border-bottom:2px solid #ddd">Item</th>
+          <th style="padding:4px 8px;text-align:left;font-size:9px;text-transform:uppercase;color:#666;border-bottom:2px solid #ddd;width:90px">Due</th>
+          <th style="padding:4px 8px;text-align:left;font-size:9px;text-transform:uppercase;color:#666;border-bottom:2px solid #ddd;width:180px">Notes</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+  }
+
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Meeting Notes — ${job.jobNumber}</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 11px; color: #1a1a1a; padding: 0.5in; }
+    tr:nth-child(even) { background: #fafbfc; }
+    @media print { body { padding: 0.25in; } }
+  </style>
+</head>
+<body>
+  <div style="display:flex;justify-content:space-between;align-items:flex-start;border-bottom:2px solid #1d5191;padding-bottom:8px;margin-bottom:16px">
+    <div>
+      <h1 style="font-size:18px;color:#1d5191">${job.jobNumber} — ${job.name}</h1>
+      <p style="font-size:11px;color:#666;margin-top:2px">Open Items Summary</p>
+    </div>
+    <div style="text-align:right;font-size:10px;color:#777">
+      <div style="font-weight:600">${company}</div>
+      <div>${dateStr}</div>
+    </div>
+  </div>
+
+  <div style="display:flex;gap:16px;margin-bottom:16px">
+    <div style="flex:1;background:#f0f4f8;border-radius:6px;padding:10px 14px">
+      <div style="font-size:9px;text-transform:uppercase;color:#666">Open</div>
+      <div style="font-size:22px;font-weight:700;color:#1d5191">${openItems.length}</div>
+    </div>
+    <div style="flex:1;background:#f0f4f8;border-radius:6px;padding:10px 14px">
+      <div style="font-size:9px;text-transform:uppercase;color:#666">Completed</div>
+      <div style="font-size:22px;font-weight:700;color:#16a34a">${doneItems.length}</div>
+    </div>
+    <div style="flex:1;background:#f0f4f8;border-radius:6px;padding:10px 14px">
+      <div style="font-size:9px;text-transform:uppercase;color:#666">Overdue</div>
+      <div style="font-size:22px;font-weight:700;color:#dc2626">${openItems.filter(i => i.dueDate && i.dueDate < now.toISOString().slice(0,10)).length}</div>
+    </div>
+  </div>
+
+  ${assigneeSections || '<p style="color:#999;text-align:center;padding:20px">No open items</p>'}
+
+  ${doneItems.length > 0 ? `
+    <h3 style="font-size:13px;font-weight:600;color:#16a34a;margin:20px 0 6px;padding-bottom:3px;border-bottom:1px solid #eee">Completed (${doneItems.length})</h3>
+    <table style="width:100%;border-collapse:collapse">
+      <tbody>${doneItems.map(i => `<tr style="opacity:0.5"><td style="padding:3px 8px;text-decoration:line-through">${i.description}</td><td style="padding:3px 8px;font-size:10px;color:#888">${i.assignedTo || ""}</td></tr>`).join("\n")}</tbody>
+    </table>
+  ` : ""}
+</body>
+</html>`;
+
+  return c.html(html);
+});
+
+export { meeting };

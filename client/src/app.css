@@ -1,0 +1,255 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── Apple-inspired global styles ────────────────────────── */
+@layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: linear-gradient(180deg, #ffffff 0%, #f5f5f7 100%);
+    min-height: 100vh;
+  }
+}
+
+/* ── Subtle card hover lift ──────────────────────────────── */
+.card-hover {
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+.card-hover:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+}
+
+/* ── Clean table styling ─────────────────────────────────── */
+.apple-table thead tr {
+  background: #f5f5f7;
+  border-bottom: 1px solid #e8e8ed;
+}
+.apple-table thead th {
+  font-weight: 600;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: #86868b;
+  padding: 0.625rem 1rem;
+}
+.apple-table tbody tr {
+  border-bottom: 1px solid #f0f0f2;
+  transition: background 0.15s;
+}
+.apple-table tbody tr:hover {
+  background: #fafafa;
+}
+.apple-table tbody td {
+  padding: 0.625rem 1rem;
+  font-size: 0.875rem;
+}
+
+/* ── Section panel (replaces heavy shadow-md cards) ──────── */
+.apple-panel {
+  background: #ffffff;
+  border: 1px solid #e8e8ed;
+  border-radius: 12px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+}
+
+/* ── Section header bar ──────────────────────────────────── */
+.apple-section-header {
+  padding: 0.625rem 1rem;
+  background: #f5f5f7;
+  border-bottom: 1px solid #e8e8ed;
+  border-radius: 12px 12px 0 0;
+  font-weight: 600;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: #86868b;
+}
+
+/* ── Drag-and-drop visual feedback ───────────────────────── */
+.drag-over {
+  @apply ring-2 ring-primary ring-offset-2 bg-primary/5;
+}
+
+.dragging {
+  @apply opacity-50 scale-95;
+  transition: opacity 0.15s, transform 0.15s;
+}
+
+.employee-card {
+  @apply cursor-grab active:cursor-grabbing;
+  transition: transform 0.15s, box-shadow 0.15s;
+}
+
+.employee-card:hover {
+  @apply shadow-md -translate-y-0.5;
+}
+
+/* Smooth transitions for the board */
+.job-card {
+  transition: box-shadow 0.2s;
+}
+
+.drop-zone {
+  @apply border-2 border-dashed border-transparent rounded-lg;
+  transition: border-color 0.15s, background-color 0.15s;
+  min-height: 80px;
+}
+
+.drop-zone.drag-over {
+  @apply border-primary bg-primary/5;
+}
+
+/* ── iOS-style glass pills ──────────────────────────────── */
+.badge {
+  backdrop-filter: blur(16px) saturate(180%);
+  -webkit-backdrop-filter: blur(16px) saturate(180%);
+  border: 0.5px solid rgba(255,255,255,0.45);
+  box-shadow:
+    0 0.5px 1px rgba(0,0,0,0.04),
+    0 1px 4px rgba(0,0,0,0.03),
+    inset 0 0.5px 0 rgba(255,255,255,0.5);
+  font-weight: 500;
+  font-size: 0.7rem;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  border-radius: 100px;
+  padding: 0 0.6em;
+  height: 1.35em;
+  min-height: 1.35em;
+  line-height: 1.35em;
+  gap: 0;
+}
+
+/* Slightly bigger for sm variant */
+.badge-sm {
+  font-size: 0.7rem;
+  padding: 0 0.65em;
+  height: 1.45em;
+  min-height: 1.45em;
+  line-height: 1.45em;
+}
+
+/* Tiny pills for table rows */
+.badge-xs {
+  font-size: 0.6rem;
+  padding: 0 0.55em;
+  height: 1.25em;
+  min-height: 1.25em;
+  line-height: 1.25em;
+}
+
+.badge-success {
+  background: rgba(52, 199, 89, 0.22) !important;
+  color: #1b7a35 !important;
+  border-color: rgba(52, 199, 89, 0.35) !important;
+}
+
+.badge-info {
+  background: rgba(0, 122, 255, 0.18) !important;
+  color: #0055b3 !important;
+  border-color: rgba(0, 122, 255, 0.3) !important;
+}
+
+.badge-warning {
+  background: rgba(255, 149, 0, 0.2) !important;
+  color: #915400 !important;
+  border-color: rgba(255, 149, 0, 0.35) !important;
+}
+
+.badge-error {
+  background: rgba(255, 59, 48, 0.18) !important;
+  color: #b8201a !important;
+  border-color: rgba(255, 59, 48, 0.3) !important;
+}
+
+.badge-neutral {
+  background: rgba(142, 142, 147, 0.16) !important;
+  color: #58585c !important;
+  border-color: rgba(142, 142, 147, 0.28) !important;
+}
+
+.badge-ghost {
+  background: rgba(174, 174, 178, 0.14) !important;
+  color: #7c7c80 !important;
+  border-color: rgba(174, 174, 178, 0.22) !important;
+}
+
+.badge-primary {
+  background: rgba(0, 122, 255, 0.18) !important;
+  color: #0055b3 !important;
+  border-color: rgba(0, 122, 255, 0.3) !important;
+}
+
+.badge-accent {
+  background: rgba(94, 92, 230, 0.18) !important;
+  color: #3f3da0 !important;
+  border-color: rgba(94, 92, 230, 0.3) !important;
+}
+
+.badge-outline.badge-success {
+  background: rgba(52, 199, 89, 0.12) !important;
+}
+
+/* ── Page-level design tokens ──────────────────────────── */
+/* Use these for consistent page headers & layout across all views */
+.page-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  max-width: 100%;
+}
+.page-title {
+  font-size: 22px;
+  font-weight: 700;
+  color: #1d1d1f;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+  margin: 0;
+}
+.page-subtitle {
+  font-size: 13px;
+  color: #86868b;
+  margin-top: 2px;
+}
+.page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.page-section-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #86868b;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: 0;
+}
+
+/* ── Resizable table columns ───────────────────────────── */
+/* Add class="table-resizable" to any <table> to enable column resize handles */
+.table-resizable th {
+  position: relative;
+  overflow: hidden;
+}
+.table-resizable th .th-resize {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 4px;
+  height: 100%;
+  cursor: col-resize;
+  background: transparent;
+  transition: background 0.15s;
+  z-index: 1;
+}
+.table-resizable th .th-resize:hover,
+.table-resizable th .th-resize.active {
+  background: #007aff;
+}

@@ -1,0 +1,559 @@
+<script lang="ts">
+  import { createEventDispatcher } from "svelte";
+  import { user, currentPage, appSettings } from "../lib/stores";
+  import BirdDogLogo from "./BirdDogLogo.svelte";
+
+  const dispatch = createEventDispatcher();
+
+  const navItems = [
+    { id: "board", label: "Workforce Board" },
+    { id: "employees", label: "People" },
+    { id: "jobs", label: "Jobs" },
+    { id: "opportunities", label: "Opportunities" },
+  ];
+
+  const assetPages = [
+    { id: "tools", label: "Tools" },
+    { id: "vehicles", label: "Vehicles" },
+  ];
+
+  const adminPages = [
+    { id: "admin", label: "Settings" },
+    { id: "classifications", label: "Classifications" },
+    { id: "jurisdictions", label: "Jurisdictions" },
+    { id: "general-contractors", label: "General Contractors" },
+    { id: "suppliers", label: "Suppliers" },
+  ];
+
+  const toolPages = [
+    { id: "schedule", label: "Schedule" },
+    { id: "meeting-tool", label: "Project Meetings" },
+    { id: "asystems-import", label: "A-Systems Import" },
+  ];
+
+  const fieldPages = [
+    { id: "daily-reports", label: "Daily Reports" },
+  ];
+
+  $: isAdmin = $user?.role === "admin" || $user?.role === "super_admin";
+  $: isSuperAdmin = $user?.role === "super_admin";
+  $: canReport = $user?.role === "admin" || $user?.role === "super_admin" || $user?.role === "pm";
+  $: isAssetPage = assetPages.some(p => p.id === $currentPage);
+  $: isToolPage = toolPages.some(p => p.id === $currentPage);
+  $: isFieldPage = fieldPages.some(p => p.id === $currentPage);
+  $: isAdminPage = adminPages.some(p => p.id === $currentPage);
+
+  let assetsOpen = false;
+  let toolsOpen = false;
+  let fieldOpen = false;
+  let adminOpen = false;
+  let mobileAssetsOpen = false;
+  let mobileToolsOpen = false;
+  let mobileFieldOpen = false;
+  let mobileAdminOpen = false;
+
+  function closeDropdowns() {
+    assetsOpen = false;
+    toolsOpen = false;
+    fieldOpen = false;
+    adminOpen = false;
+  }
+
+  function selectAssetPage(id: string) {
+    currentPage.set(id);
+    assetsOpen = false;
+    mobileAssetsOpen = false;
+  }
+
+  function selectToolPage(id: string) {
+    currentPage.set(id);
+    toolsOpen = false;
+    mobileToolsOpen = false;
+  }
+
+  function selectFieldPage(id: string) {
+    currentPage.set(id);
+    fieldOpen = false;
+    mobileFieldOpen = false;
+  }
+
+  function selectAdminPage(id: string) {
+    currentPage.set(id);
+    adminOpen = false;
+    mobileAdminOpen = false;
+  }
+</script>
+
+<svelte:window on:click={closeDropdowns} />
+
+<!-- Apple-style top nav: white, thin border, clean -->
+<nav class="anav">
+  <div class="anav-inner">
+    <!-- Logo -->
+    <button class="anav-logo" on:click={() => currentPage.set("board")}>
+      <BirdDogLogo size={28} />
+      <div class="anav-logo-text">
+        <span class="anav-logo-title">BirdDog</span>
+        {#if $appSettings.companyName}
+          <span class="anav-logo-sub">{$appSettings.companyName}</span>
+        {/if}
+      </div>
+    </button>
+
+    <!-- Desktop nav links -->
+    <div class="anav-links">
+      {#each navItems as item}
+        <button
+          class="anav-link"
+          class:anav-active={$currentPage === item.id}
+          on:click={() => currentPage.set(item.id)}
+        >
+          {item.label}
+        </button>
+      {/each}
+
+      <!-- Assets dropdown -->
+      <div class="anav-dropdown-wrap">
+        <button
+          class="anav-link anav-link-dd"
+          class:anav-active={isAssetPage}
+          on:click|stopPropagation={() => { assetsOpen = !assetsOpen; toolsOpen = false; adminOpen = false; }}
+        >
+          Assets
+          <svg class="anav-chev" class:anav-chev-up={assetsOpen} xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
+            <path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clip-rule="evenodd" />
+          </svg>
+        </button>
+        {#if assetsOpen}
+          <!-- svelte-ignore a11y-click-events-have-key-events -->
+          <!-- svelte-ignore a11y-no-static-element-interactions -->
+          <div class="anav-menu" on:click|stopPropagation>
+            {#each assetPages as page}
+              <button
+                class="anav-menu-item"
+                class:anav-menu-active={$currentPage === page.id}
+                on:click={() => selectAssetPage(page.id)}
+              >{page.label}</button>
+            {/each}
+          </div>
+        {/if}
+      </div>
+
+      <!-- Project Tools dropdown -->
+      <div class="anav-dropdown-wrap">
+        <button
+          class="anav-link anav-link-dd"
+          class:anav-active={isToolPage}
+          on:click|stopPropagation={() => { toolsOpen = !toolsOpen; assetsOpen = false; adminOpen = false; }}
+        >
+          Tools
+          <svg class="anav-chev" class:anav-chev-up={toolsOpen} xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
+            <path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clip-rule="evenodd" />
+          </svg>
+        </button>
+        {#if toolsOpen}
+          <!-- svelte-ignore a11y-click-events-have-key-events -->
+          <!-- svelte-ignore a11y-no-static-element-interactions -->
+          <div class="anav-menu" on:click|stopPropagation>
+            {#each toolPages as page}
+              <button
+                class="anav-menu-item"
+                class:anav-menu-active={$currentPage === page.id}
+                on:click={() => selectToolPage(page.id)}
+              >{page.label}</button>
+            {/each}
+          </div>
+        {/if}
+      </div>
+
+      <!-- Field dropdown (super_admin only during testing) -->
+      {#if isSuperAdmin}
+        <div class="anav-dropdown-wrap">
+          <button
+            class="anav-link anav-link-dd"
+            class:anav-active={isFieldPage}
+            on:click|stopPropagation={() => { fieldOpen = !fieldOpen; assetsOpen = false; toolsOpen = false; adminOpen = false; }}
+          >
+            Field
+            <svg class="anav-chev" class:anav-chev-up={fieldOpen} xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
+              <path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clip-rule="evenodd" />
+            </svg>
+          </button>
+          {#if fieldOpen}
+            <!-- svelte-ignore a11y-click-events-have-key-events -->
+            <!-- svelte-ignore a11y-no-static-element-interactions -->
+            <div class="anav-menu" on:click|stopPropagation>
+              {#each fieldPages as page}
+                <button
+                  class="anav-menu-item"
+                  class:anav-menu-active={$currentPage === page.id}
+                  on:click={() => selectFieldPage(page.id)}
+                >{page.label}</button>
+              {/each}
+            </div>
+          {/if}
+        </div>
+      {/if}
+
+      {#if canReport}
+        <button
+          class="anav-link"
+          class:anav-active={$currentPage === "reports"}
+          on:click={() => currentPage.set("reports")}
+        >Reports</button>
+      {/if}
+      <button
+        class="anav-link"
+        class:anav-active={$currentPage === "chat"}
+        on:click={() => currentPage.set("chat")}
+      >AI Chat</button>
+      <!-- Admin dropdown -->
+      {#if isAdmin}
+        <div class="anav-dropdown-wrap">
+          <button
+            class="anav-link anav-link-dd"
+            class:anav-active={isAdminPage}
+            on:click|stopPropagation={() => { adminOpen = !adminOpen; assetsOpen = false; toolsOpen = false; }}
+          >
+            Admin
+            <svg class="anav-chev" class:anav-chev-up={adminOpen} xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
+              <path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clip-rule="evenodd" />
+            </svg>
+          </button>
+          {#if adminOpen}
+            <!-- svelte-ignore a11y-click-events-have-key-events -->
+            <!-- svelte-ignore a11y-no-static-element-interactions -->
+            <div class="anav-menu" on:click|stopPropagation>
+              {#each adminPages as page}
+                <button
+                  class="anav-menu-item"
+                  class:anav-menu-active={$currentPage === page.id}
+                  on:click={() => selectAdminPage(page.id)}
+                >{page.label}</button>
+              {/each}
+            </div>
+          {/if}
+        </div>
+      {/if}
+    </div>
+
+    <!-- Right side: user + logout -->
+    <div class="anav-right">
+      <span class="anav-user">
+        {$user?.displayName}
+        <span class="anav-role">{$user?.role}</span>
+      </span>
+      <button class="anav-logout" on:click={() => dispatch("logout")}>
+        Sign Out
+      </button>
+    </div>
+  </div>
+</nav>
+
+<!-- Mobile bottom nav -->
+<div class="anav-mobile">
+  {#each navItems as item}
+    <button
+      class="anav-mob-btn"
+      class:anav-mob-active={$currentPage === item.id}
+      on:click={() => currentPage.set(item.id)}
+    >
+      <span>{item.label}</span>
+    </button>
+  {/each}
+
+  <button
+    class="anav-mob-btn"
+    class:anav-mob-active={isAssetPage}
+    on:click|stopPropagation={() => { mobileAssetsOpen = !mobileAssetsOpen; mobileToolsOpen = false; mobileAdminOpen = false; }}
+  ><span>Assets</span></button>
+
+  <button
+    class="anav-mob-btn"
+    class:anav-mob-active={isToolPage}
+    on:click|stopPropagation={() => { mobileToolsOpen = !mobileToolsOpen; mobileAssetsOpen = false; mobileAdminOpen = false; }}
+  ><span>Tools</span></button>
+
+  {#if isSuperAdmin}
+    <button
+      class="anav-mob-btn"
+      class:anav-mob-active={isFieldPage}
+      on:click|stopPropagation={() => { mobileFieldOpen = !mobileFieldOpen; mobileAssetsOpen = false; mobileToolsOpen = false; mobileAdminOpen = false; }}
+    ><span>Field</span></button>
+  {/if}
+
+  {#if canReport}
+    <button
+      class="anav-mob-btn"
+      class:anav-mob-active={$currentPage === "reports"}
+      on:click={() => currentPage.set("reports")}
+    ><span>Reports</span></button>
+  {/if}
+  <button
+    class="anav-mob-btn"
+    class:anav-mob-active={$currentPage === "chat"}
+    on:click={() => currentPage.set("chat")}
+  ><span>AI Chat</span></button>
+  {#if isAdmin}
+    <button
+      class="anav-mob-btn"
+      class:anav-mob-active={isAdminPage}
+      on:click|stopPropagation={() => { mobileAdminOpen = !mobileAdminOpen; mobileAssetsOpen = false; mobileToolsOpen = false; }}
+    ><span>Admin</span></button>
+  {/if}
+</div>
+
+<!-- Mobile popup menus -->
+{#if mobileAssetsOpen}
+  <!-- svelte-ignore a11y-click-events-have-key-events -->
+  <!-- svelte-ignore a11y-no-static-element-interactions -->
+  <div class="anav-mob-overlay" on:click={() => mobileAssetsOpen = false}>
+    <div class="anav-mob-popup" on:click|stopPropagation>
+      {#each assetPages as page}
+        <button class="anav-mob-popup-item" class:anav-mob-popup-active={$currentPage === page.id} on:click={() => selectAssetPage(page.id)}>
+          {page.label}
+        </button>
+      {/each}
+    </div>
+  </div>
+{/if}
+
+{#if mobileToolsOpen}
+  <!-- svelte-ignore a11y-click-events-have-key-events -->
+  <!-- svelte-ignore a11y-no-static-element-interactions -->
+  <div class="anav-mob-overlay" on:click={() => mobileToolsOpen = false}>
+    <div class="anav-mob-popup" on:click|stopPropagation>
+      {#each toolPages as page}
+        <button class="anav-mob-popup-item" class:anav-mob-popup-active={$currentPage === page.id} on:click={() => selectToolPage(page.id)}>
+          {page.label}
+        </button>
+      {/each}
+    </div>
+  </div>
+{/if}
+
+{#if mobileFieldOpen}
+  <!-- svelte-ignore a11y-click-events-have-key-events -->
+  <!-- svelte-ignore a11y-no-static-element-interactions -->
+  <div class="anav-mob-overlay" on:click={() => mobileFieldOpen = false}>
+    <div class="anav-mob-popup" on:click|stopPropagation>
+      {#each fieldPages as page}
+        <button class="anav-mob-popup-item" class:anav-mob-popup-active={$currentPage === page.id} on:click={() => selectFieldPage(page.id)}>
+          {page.label}
+        </button>
+      {/each}
+    </div>
+  </div>
+{/if}
+
+{#if mobileAdminOpen}
+  <!-- svelte-ignore a11y-click-events-have-key-events -->
+  <!-- svelte-ignore a11y-no-static-element-interactions -->
+  <div class="anav-mob-overlay" on:click={() => mobileAdminOpen = false}>
+    <div class="anav-mob-popup" on:click|stopPropagation>
+      {#each adminPages as page}
+        <button class="anav-mob-popup-item" class:anav-mob-popup-active={$currentPage === page.id} on:click={() => selectAdminPage(page.id)}>
+          {page.label}
+        </button>
+      {/each}
+    </div>
+  </div>
+{/if}
+
+<style>
+  /* ── Top nav bar ───────────────────────────────────────── */
+  .anav {
+    position: sticky;
+    top: 0;
+    z-index: 50;
+    background: rgba(255,255,255,0.92);
+    backdrop-filter: saturate(180%) blur(20px);
+    -webkit-backdrop-filter: saturate(180%) blur(20px);
+    border-bottom: 1px solid #e8e8ed;
+  }
+  .anav-inner {
+    max-width: 1600px;
+    margin: 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 1rem;
+    height: 48px;
+  }
+
+  /* Logo */
+  .anav-logo {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0;
+    border: none;
+    background: none;
+    cursor: pointer;
+    transition: opacity 0.15s;
+  }
+  .anav-logo:hover { opacity: 0.7; }
+  .anav-logo-text { display: flex; flex-direction: column; line-height: 1.1; }
+  .anav-logo-title { font-size: 1.125rem; font-weight: 700; color: #1d1d1f; letter-spacing: -0.01em; }
+  .anav-logo-sub { font-size: 0.625rem; color: #86868b; margin-top: -1px; }
+
+  /* Nav links */
+  .anav-links { display: none; align-items: center; gap: 0.125rem; margin-left: 1.5rem; }
+  @media (min-width: 768px) { .anav-links { display: flex; } }
+  .anav-link {
+    padding: 0.375rem 0.75rem;
+    border: none;
+    background: none;
+    cursor: pointer;
+    font-size: 0.8125rem;
+    font-weight: 500;
+    color: #424245;
+    border-radius: 8px;
+    transition: background 0.15s, color 0.15s;
+    white-space: nowrap;
+  }
+  .anav-link:hover { background: #f5f5f7; color: #1d1d1f; }
+  .anav-active { background: #f0f0f3; color: #1d5191; font-weight: 600; }
+  .anav-link-dd { display: inline-flex; align-items: center; gap: 0.25rem; }
+
+  /* Chevron */
+  .anav-chev { width: 0.625rem; height: 0.625rem; transition: transform 0.2s; }
+  .anav-chev-up { transform: rotate(180deg); }
+
+  /* Dropdown menus */
+  .anav-dropdown-wrap { position: relative; }
+  .anav-menu {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    min-width: 160px;
+    background: rgba(255,255,255,0.98);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border: 1px solid #e8e8ed;
+    border-radius: 10px;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.08), 0 1px 4px rgba(0,0,0,0.04);
+    padding: 4px;
+    z-index: 60;
+  }
+  .anav-menu-item {
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: 0.5rem 0.75rem;
+    border: none;
+    background: none;
+    cursor: pointer;
+    font-size: 0.8125rem;
+    font-weight: 500;
+    color: #424245;
+    border-radius: 6px;
+    transition: background 0.12s;
+  }
+  .anav-menu-item:hover { background: #f5f5f7; }
+  .anav-menu-active { background: #eef0f5; color: #1d5191; font-weight: 600; }
+
+  /* Right side */
+  .anav-right { display: flex; align-items: center; gap: 0.75rem; }
+  .anav-user { display: none; font-size: 0.8125rem; color: #86868b; }
+  @media (min-width: 640px) { .anav-user { display: inline; } }
+  .anav-role {
+    display: inline-block;
+    margin-left: 0.375rem;
+    padding: 0.1rem 0.5rem;
+    font-size: 0.625rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    background: #f5f5f7;
+    color: #86868b;
+    border-radius: 10px;
+    border: 1px solid #e8e8ed;
+  }
+  .anav-logout {
+    padding: 0.375rem 0.75rem;
+    border: none;
+    background: none;
+    cursor: pointer;
+    font-size: 0.8125rem;
+    font-weight: 500;
+    color: #86868b;
+    border-radius: 8px;
+    transition: background 0.15s, color 0.15s;
+  }
+  .anav-logout:hover { background: #f5f5f7; color: #1d1d1f; }
+
+  /* ── Mobile bottom nav ─────────────────────────────────── */
+  .anav-mobile {
+    display: flex;
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    z-index: 50;
+    background: rgba(255,255,255,0.92);
+    backdrop-filter: saturate(180%) blur(20px);
+    -webkit-backdrop-filter: saturate(180%) blur(20px);
+    border-top: 1px solid #e8e8ed;
+    padding: 0.375rem 0.25rem;
+    overflow-x: auto;
+    gap: 0;
+  }
+  @media (min-width: 768px) { .anav-mobile { display: none; } }
+
+  .anav-mob-btn {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0.375rem 0.25rem;
+    border: none;
+    background: none;
+    cursor: pointer;
+    font-size: 0.625rem;
+    font-weight: 500;
+    color: #86868b;
+    transition: color 0.15s;
+    white-space: nowrap;
+  }
+  .anav-mob-active { color: #1d5191; font-weight: 600; }
+
+  /* Mobile popup menus */
+  .anav-mob-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 60;
+    background: rgba(0,0,0,0.2);
+  }
+  .anav-mob-popup {
+    position: absolute;
+    bottom: 3.5rem;
+    left: 50%;
+    transform: translateX(-50%);
+    min-width: 160px;
+    background: rgba(255,255,255,0.98);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border: 1px solid #e8e8ed;
+    border-radius: 12px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.12);
+    padding: 4px;
+  }
+  .anav-mob-popup-item {
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: 0.75rem 1rem;
+    border: none;
+    background: none;
+    cursor: pointer;
+    font-size: 0.875rem;
+    font-weight: 500;
+    color: #424245;
+    border-radius: 8px;
+    transition: background 0.12s;
+  }
+  .anav-mob-popup-item:hover { background: #f5f5f7; }
+  .anav-mob-popup-active { background: #eef0f5; color: #1d5191; font-weight: 600; }
+</style>

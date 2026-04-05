@@ -1,0 +1,2112 @@
+<script lang="ts">
+  import { onMount } from "svelte";
+  import { api } from "../lib/api";
+  import { user } from "../lib/stores";
+
+  interface Job { id: number; jobNumber: string; name: string; status: string; }
+  interface Employee { id: number; firstName: string; lastName: string; classificationName: string; }
+  interface CrewMember { id: number; firstName: string; lastName: string; photoUrl: string | null; role: string | null; classification: string | null; }
+  interface ActionItem {
+    id: number; jobId: number; description: string;
+    assignedToId: number | null; assignedTo: string | null; assignedName: string | null;
+    priority: string; status: string; dueDate: string | null; notes: string | null;
+    completedAt: string | null; completedBy: string | null; createdAt: string;
+  }
+  interface Template { id: number; name: string; description: string | null; }
+
+  interface JobMetrics {
+    jobId: number; hourBudget: number; hoursUsed: number; hourPct: number;
+    crewCount: number; foremanName: string | null; crewMembers: CrewMember[];
+    cpi: number | null; pctComplete: number | null;
+    healthScore: number | null; healthLabel: string; healthColor: string;
+    risks: string[]; hasDetail: boolean; hasSummary: boolean;
+  }
+
+  let jobs: Job[] = [];
+  let jobIdx = 0;
+  let items: ActionItem[] = [];
+  let templates: Template[] = [];
+  let employees: Employee[] = [];
+  let metrics: JobMetrics | null = null;
+  let metricsLoading = false;
+  let loading = true;
+  let error = "";
+  let showDone = false;
+
+  // Inline add
+  let newDesc = "";
+  let newAssigned = "";
+  let newPriority = "normal";
+  let newDue = "";
+  let adding = false;
+
+  // Confirm delete
+  let confirmDeleteId: number | null = null;
+
+  // Template modal
+  let showTemplateModal = false;
+  let selectedTemplateId = "";
+  let applyingTemplate = false;
+
+  // Template management
+  interface TemplateItem { id: number; templateId: number; description: string; assignedTo: string | null; priority: string; sortOrder: number; }
+  let showManageTemplates = false;
+  let managingTemplate: Template | null = null;
+  let managingItems: TemplateItem[] = [];
+  let managingItemsLoading = false;
+  let newTemplateName = "";
+  let newTemplateDesc = "";
+  let creatingTemplate = false;
+  let editingTemplateName = false;
+  let editTemplateName = "";
+  let editTemplateDesc = "";
+  let newTplItemDesc = "";
+  let newTplItemAssigned = "";
+  let newTplItemPriority = "normal";
+  let addingTplItem = false;
+  let editTplItem: TemplateItem | null = null;
+  let editTplItemDesc = "";
+  let editTplItemAssigned = "";
+  let editTplItemPriority = "normal";
+
+  // Crew popout
+  let crewExpanded = false;
+
+  // Job status change
+  let changingStatus = false;
+  async function changeJobStatus(newStatus: string) {
+    if (!currentJob || changingStatus) return;
+    changingStatus = true;
+    try {
+      await api.patch(`/jobs/${currentJob.id}/status`, { status: newStatus });
+      // Refresh job list — if the job moved out of active/planning it may disappear
+      const prevId = currentJob.id;
+      await loadJobs();
+      // Try to stay on same job, or fallback
+      const stillThere = jobs.findIndex(j => j.id === prevId);
+      if (stillThere >= 0) {
+        jobIdx = stillThere;
+      } else {
+        jobIdx = Math.min(jobIdx, jobs.length - 1);
+      }
+      if (jobs.length > 0) {
+        await Promise.all([loadItems(jobs[jobIdx]?.id), loadMetrics(jobs[jobIdx]?.id)]);
+      } else {
+        items = [];
+        metrics = null;
+      }
+    } catch (e: any) { error = e.message; }
+    changingStatus = false;
+  }
+
+  // Expanded notes
+  let expandedNotes: Set<number> = new Set();
+  function toggleNotes(id: number) {
+    if (expandedNotes.has(id)) {
+      expandedNotes.delete(id);
+    } else {
+      expandedNotes.add(id);
+    }
+    expandedNotes = expandedNotes; // trigger reactivity
+  }
+
+  // Column resize
+  let resizing: { th: HTMLElement; startX: number; startW: number } | null = null;
+  function onResizeStart(e: MouseEvent) {
+    const th = (e.target as HTMLElement).parentElement as HTMLElement;
+    resizing = { th, startX: e.clientX, startW: th.offsetWidth };
+    document.addEventListener("mousemove", onResizeMove);
+    document.addEventListener("mouseup", onResizeEnd);
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+  }
+  function onResizeMove(e: MouseEvent) {
+    if (!resizing) return;
+    const w = Math.max(50, resizing.startW + (e.clientX - resizing.startX));
+    resizing.th.style.width = w + "px";
+  }
+  function onResizeEnd() {
+    resizing = null;
+    document.removeEventListener("mousemove", onResizeMove);
+    document.removeEventListener("mouseup", onResizeEnd);
+    document.body.style.cursor = "";
+    document.body.style.userSelect = "";
+  }
+
+  $: canEdit = $user?.role === "super_admin" || $user?.role === "admin" || $user?.role === "pm";
+  $: currentJob = jobs[jobIdx] || null;
+  $: openItems = items.filter(i => i.status === "open");
+  $: doneItems = items.filter(i => i.status === "done");
+  $: visibleItems = showDone ? [...openItems, ...doneItems] : openItems;
+  $: overdueCount = openItems.filter(i => i.dueDate && i.dueDate < new Date().toISOString().slice(0, 10)).length;
+  $: staleCount = openItems.filter(i => isStale(i)).length;
+
+  async function loadJobs() {
+    try {
+      const all = await api.get("/jobs");
+      jobs = all.filter((j: Job) => j.status === "active" || j.status === "planning");
+    } catch (e: any) { error = e.message; }
+  }
+
+  async function loadItems(overrideJobId?: number) {
+    const jid = overrideJobId ?? currentJob?.id;
+    if (!jid) { items = []; return; }
+    try {
+      items = await api.get(`/meeting/items?jobId=${jid}`);
+    } catch (e: any) { error = e.message; }
+  }
+
+  async function loadTemplates() {
+    try { templates = await api.get("/meeting/templates"); } catch {}
+  }
+
+  async function loadEmployees() {
+    try {
+      const all = await api.get("/employees?status=active");
+      employees = all.sort((a: Employee, b: Employee) => a.firstName.localeCompare(b.firstName));
+    } catch {}
+  }
+
+  async function loadMetrics(jobId?: number) {
+    const jid = jobId ?? currentJob?.id;
+    if (!jid) { metrics = null; return; }
+    metricsLoading = true;
+    try {
+      metrics = await api.get(`/meeting/job-metrics?jobId=${jid}`);
+    } catch {
+      metrics = null;
+    }
+    metricsLoading = false;
+  }
+
+  // Parse a dropdown value into assignedToId + assignedTo text
+  function parseAssignee(val: string): { assignedToId: number | null; assignedTo: string | null } {
+    if (!val) return { assignedToId: null, assignedTo: null };
+    if (val.startsWith("emp:")) {
+      const empId = parseInt(val.slice(4));
+      return { assignedToId: empId, assignedTo: null };
+    }
+    return { assignedToId: null, assignedTo: val };
+  }
+
+  // Convert an item's assignment back to a dropdown value
+  function toDropdownVal(item: ActionItem): string {
+    if (item.assignedToId) return `emp:${item.assignedToId}`;
+    if (item.assignedTo) return item.assignedTo;
+    return "";
+  }
+
+  onMount(async () => {
+    await Promise.all([loadJobs(), loadTemplates(), loadEmployees()]);
+    if (jobs.length > 0) {
+      await Promise.all([loadItems(), loadMetrics()]);
+    }
+    loading = false;
+  });
+
+  function prevJob() { if (jobIdx > 0) { jobIdx--; crewExpanded = false; loadItems(jobs[jobIdx].id); loadMetrics(jobs[jobIdx].id); } }
+  function nextJob() { if (jobIdx < jobs.length - 1) { jobIdx++; crewExpanded = false; loadItems(jobs[jobIdx].id); loadMetrics(jobs[jobIdx].id); } }
+  function goToJob(id: number) {
+    const idx = jobs.findIndex(j => j.id === id);
+    if (idx >= 0) { jobIdx = idx; crewExpanded = false; loadItems(jobs[idx].id); loadMetrics(jobs[idx].id); }
+  }
+
+  // Quick add
+  async function addItem() {
+    if (!newDesc.trim() || !currentJob) return;
+    adding = true;
+    try {
+      const assign = parseAssignee(newAssigned);
+      await api.post("/meeting/items", {
+        jobId: currentJob.id,
+        description: newDesc.trim(),
+        assignedToId: assign.assignedToId,
+        assignedTo: assign.assignedTo,
+        priority: newPriority,
+        dueDate: newDue || null,
+        createdBy: $user?.displayName || null,
+      });
+      newDesc = ""; newAssigned = ""; newPriority = "normal"; newDue = "";
+      await loadItems();
+    } catch (e: any) { error = e.message; }
+    adding = false;
+  }
+
+  function handleAddKeydown(e: KeyboardEvent) {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); addItem(); }
+  }
+
+  async function toggleItem(item: ActionItem) {
+    try {
+      await api.patch(`/meeting/items/${item.id}/toggle`, {});
+      await loadItems();
+    } catch (e: any) { error = e.message; }
+  }
+
+  // Inline field save — auto-saves on blur/change
+  async function saveField(item: ActionItem, field: string, value: any) {
+    try {
+      const payload: any = { [field]: value };
+      if (field === "assignedRaw") {
+        const assign = parseAssignee(value);
+        payload.assignedToId = assign.assignedToId;
+        payload.assignedTo = assign.assignedTo;
+        delete payload.assignedRaw;
+      }
+      await api.put(`/meeting/items/${item.id}`, payload);
+      await loadItems();
+    } catch (e: any) { error = e.message; }
+  }
+
+  function cyclePriority(item: ActionItem) {
+    const order = ["low", "normal", "high", "urgent"];
+    const idx = order.indexOf(item.priority);
+    const next = order[(idx + 1) % order.length];
+    saveField(item, "priority", next);
+  }
+
+  async function deleteItem(id: number) {
+    try { await api.del(`/meeting/items/${id}`); confirmDeleteId = null; await loadItems(); }
+    catch (e: any) { error = e.message; confirmDeleteId = null; }
+  }
+
+  async function applyTemplate() {
+    if (!selectedTemplateId || !currentJob) return;
+    applyingTemplate = true;
+    try {
+      await api.post("/meeting/apply-template", {
+        jobId: currentJob.id,
+        templateId: parseInt(selectedTemplateId),
+      });
+      showTemplateModal = false;
+      selectedTemplateId = "";
+      await loadItems();
+    } catch (e: any) { error = e.message; }
+    applyingTemplate = false;
+  }
+
+  // ── Template Management ──────────────────────────────────
+  function openManageTemplates() {
+    showTemplateModal = false;
+    showManageTemplates = true;
+    managingTemplate = null;
+    managingItems = [];
+    newTemplateName = "";
+    newTemplateDesc = "";
+  }
+
+  async function selectManageTemplate(t: Template) {
+    managingTemplate = t;
+    editingTemplateName = false;
+    managingItemsLoading = true;
+    try {
+      managingItems = await api.get(`/meeting/templates/${t.id}/items`);
+    } catch (e: any) { error = e.message; }
+    managingItemsLoading = false;
+  }
+
+  async function createTemplate() {
+    if (!newTemplateName.trim()) return;
+    creatingTemplate = true;
+    try {
+      const t = await api.post("/meeting/templates", { name: newTemplateName.trim(), description: newTemplateDesc.trim() || null });
+      await loadTemplates();
+      newTemplateName = "";
+      newTemplateDesc = "";
+      selectManageTemplate(t);
+    } catch (e: any) { error = e.message; }
+    creatingTemplate = false;
+  }
+
+  function startEditTemplateName() {
+    if (!managingTemplate) return;
+    editTemplateName = managingTemplate.name;
+    editTemplateDesc = managingTemplate.description || "";
+    editingTemplateName = true;
+  }
+
+  async function saveTemplateName() {
+    if (!managingTemplate || !editTemplateName.trim()) return;
+    try {
+      const updated = await api.put(`/meeting/templates/${managingTemplate.id}`, {
+        name: editTemplateName.trim(),
+        description: editTemplateDesc.trim() || null,
+      });
+      managingTemplate = updated;
+      await loadTemplates();
+      editingTemplateName = false;
+    } catch (e: any) { error = e.message; }
+  }
+
+  async function deleteTemplate(t: Template) {
+    try {
+      await api.del(`/meeting/templates/${t.id}`);
+      await loadTemplates();
+      if (managingTemplate?.id === t.id) {
+        managingTemplate = null;
+        managingItems = [];
+      }
+    } catch (e: any) { error = e.message; }
+  }
+
+  async function addTemplateItem() {
+    if (!managingTemplate || !newTplItemDesc.trim()) return;
+    addingTplItem = true;
+    try {
+      await api.post(`/meeting/templates/${managingTemplate.id}/items`, {
+        description: newTplItemDesc.trim(),
+        assignedTo: newTplItemAssigned || null,
+        priority: newTplItemPriority,
+        sortOrder: managingItems.length,
+      });
+      newTplItemDesc = "";
+      newTplItemAssigned = "";
+      newTplItemPriority = "normal";
+      managingItems = await api.get(`/meeting/templates/${managingTemplate.id}/items`);
+    } catch (e: any) { error = e.message; }
+    addingTplItem = false;
+  }
+
+  function handleTplItemKeydown(e: KeyboardEvent) {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); addTemplateItem(); }
+  }
+
+  function startEditTplItem(item: TemplateItem) {
+    editTplItem = item;
+    editTplItemDesc = item.description;
+    editTplItemAssigned = item.assignedTo || "";
+    editTplItemPriority = item.priority;
+  }
+
+  async function saveEditTplItem() {
+    if (!editTplItem || !editTplItemDesc.trim() || !managingTemplate) return;
+    try {
+      await api.put(`/meeting/template-items/${editTplItem.id}`, {
+        description: editTplItemDesc.trim(),
+        assignedTo: editTplItemAssigned || null,
+        priority: editTplItemPriority,
+        sortOrder: editTplItem.sortOrder,
+      });
+      editTplItem = null;
+      managingItems = await api.get(`/meeting/templates/${managingTemplate.id}/items`);
+    } catch (e: any) { error = e.message; }
+  }
+
+  async function deleteTplItem(itemId: number) {
+    if (!managingTemplate) return;
+    try {
+      await api.del(`/meeting/template-items/${itemId}`);
+      managingItems = await api.get(`/meeting/templates/${managingTemplate.id}/items`);
+    } catch (e: any) { error = e.message; }
+  }
+
+  function closeManageTemplates() {
+    showManageTemplates = false;
+    managingTemplate = null;
+    managingItems = [];
+  }
+
+  // ── Drag to reorder ──────────────────────────────────────
+  let dragIdx: number | null = null;
+  let dragOverIdx: number | null = null;
+
+  function onDragStart(e: DragEvent, idx: number) {
+    dragIdx = idx;
+    if (e.dataTransfer) {
+      e.dataTransfer.effectAllowed = "move";
+      e.dataTransfer.setData("text/plain", String(idx));
+    }
+  }
+
+  function onDragOver(e: DragEvent, idx: number) {
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+    dragOverIdx = idx;
+  }
+
+  function onDragLeave() {
+    dragOverIdx = null;
+  }
+
+  async function onDrop(e: DragEvent, dropIdx: number) {
+    e.preventDefault();
+    dragOverIdx = null;
+    if (dragIdx === null || dragIdx === dropIdx) { dragIdx = null; return; }
+
+    // Reorder the visible open items
+    const reordered = [...openItems];
+    const [moved] = reordered.splice(dragIdx, 1);
+    reordered.splice(dropIdx, 0, moved);
+
+    // Build order payload
+    const order = reordered.map((item, i) => ({ id: item.id, sortOrder: i }));
+
+    // Optimistic update
+    items = [...reordered, ...doneItems];
+    dragIdx = null;
+
+    try {
+      await api.put("/meeting/items/reorder", { order });
+    } catch (e: any) {
+      error = (e as Error).message;
+      await loadItems();
+    }
+  }
+
+  function onDragEnd() {
+    dragIdx = null;
+    dragOverIdx = null;
+  }
+
+  function openSnapshot() {
+    if (!currentJob) return;
+    window.open(`/api/meeting/snapshot?jobId=${currentJob.id}`, "_blank");
+  }
+
+  function priorityDot(p: string): string {
+    const c: Record<string, string> = { urgent: "#dc2626", high: "#f97316", normal: "#3b82f6", low: "#9ca3af" };
+    return c[p] || c.normal;
+  }
+
+  function isOverdue(d: string | null): boolean {
+    if (!d) return false;
+    return d < new Date().toISOString().slice(0, 10);
+  }
+
+  function isStale(item: ActionItem): boolean {
+    if (item.status !== "open") return false;
+    // Stale if overdue
+    if (item.dueDate && item.dueDate < new Date().toISOString().slice(0, 10)) return true;
+    // Stale if open 14+ days
+    const created = new Date(item.createdAt).getTime();
+    const daysSince = (Date.now() - created) / 86400000;
+    return daysSince >= 14;
+  }
+
+  function fmtCompleted(d: string): string {
+    const dt = new Date(d);
+    return dt.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  }
+
+  function staleDays(item: ActionItem): string {
+    if (item.dueDate && item.dueDate < new Date().toISOString().slice(0, 10)) {
+      const diff = Math.ceil((Date.now() - new Date(item.dueDate + "T12:00:00").getTime()) / 86400000);
+      return `${diff}d overdue`;
+    }
+    const days = Math.floor((Date.now() - new Date(item.createdAt).getTime()) / 86400000);
+    return `${days}d open`;
+  }
+
+  function fmtDue(d: string): string {
+    const dt = new Date(d + "T12:00:00");
+    return dt.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  }
+
+  function relDue(d: string): string {
+    const diff = Math.ceil((new Date(d + "T12:00:00").getTime() - Date.now()) / 86400000);
+    if (diff < 0) return `${Math.abs(diff)}d overdue`;
+    if (diff === 0) return "Today";
+    if (diff === 1) return "Tomorrow";
+    return `${diff}d`;
+  }
+</script>
+
+<div class="mt-page">
+
+  {#if loading}
+    <div class="mt-loading"><span class="loading loading-spinner loading-lg text-primary"></span></div>
+  {:else if jobs.length === 0}
+    <div class="mt-empty">No active jobs found</div>
+  {:else}
+
+    <h1 class="page-title" style="text-align:center;">Project Meetings</h1>
+
+    <!-- Job Navigator -->
+    <header class="mt-nav">
+      <button class="mt-arrow" disabled={jobIdx === 0} on:click={prevJob}>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5" /></svg>
+      </button>
+      <div class="mt-nav-center">
+        <select class="mt-job-select" value={currentJob?.id} on:change={(e) => goToJob(parseInt(e.currentTarget.value))}>
+          {#each jobs as job, i}
+            <option value={job.id}>{job.jobNumber} — {job.name}</option>
+          {/each}
+        </select>
+        <div class="mt-nav-sub">
+          {#if canEdit && currentJob}
+            <select
+              class="mt-status-chip mt-status-{currentJob.status}"
+              value={currentJob.status}
+              on:change={(e) => changeJobStatus(e.currentTarget.value)}
+              disabled={changingStatus}
+            >
+              <option value="planning">Planning</option>
+              <option value="active">Active</option>
+              <option value="completed">Completed</option>
+              <option value="closed">Closed</option>
+            </select>
+          {:else if currentJob}
+            <span class="mt-status-chip mt-status-{currentJob.status}">{currentJob.status}</span>
+          {/if}
+          <span class="mt-nav-dot"></span>
+          <span class="mt-nav-count">{openItems.length} open</span>
+          {#if overdueCount > 0}<span class="mt-nav-dot"></span><span class="mt-overdue-badge">{overdueCount} overdue</span>{/if}
+          {#if staleCount > 0 && staleCount !== overdueCount}<span class="mt-nav-dot"></span><span class="mt-stale-badge">{staleCount} stale</span>{/if}
+        </div>
+      </div>
+      <button class="mt-arrow" disabled={jobIdx === jobs.length - 1} on:click={nextJob}>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" /></svg>
+      </button>
+    </header>
+
+    <!-- Toolbar -->
+    <div class="mt-toolbar">
+      <label class="mt-toggle">
+        <input type="checkbox" bind:checked={showDone} />
+        <span>Show completed</span>
+      </label>
+      <div class="mt-toolbar-right">
+        {#if canEdit && templates.length > 0}
+          <button class="mt-btn" on:click={() => showTemplateModal = true}>
+            <svg class="mt-btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" /></svg>
+            Template
+          </button>
+        {/if}
+        <button class="mt-btn" on:click={openSnapshot}>
+          <svg class="mt-btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" /></svg>
+            Snapshot
+          </button>
+      </div>
+    </div>
+
+    <!-- Mini Dashboard -->
+    {#if metricsLoading}
+      <div class="mt-dash">
+        <div class="mt-dash-loading">
+          <span class="loading loading-dots loading-sm text-primary"></span>
+        </div>
+      </div>
+    {:else if metrics && (metrics.hasDetail || metrics.hasSummary)}
+      <div class="mt-dash">
+        <!-- Health Score -->
+        <div class="mt-dash-card mt-dash-health" title="Composite score: Budget (30%) + Hours (20%) + Profit (25%) + CPI (15%) + Cash Collection (10%). Scores: 90+ Excellent, 70+ Good, 50+ Fair, 25+ Poor, &lt;25 Critical.">
+          {#if metrics.healthScore !== null}
+            <div class="mt-score-ring" style="--score-color: {metrics.healthColor}; --score-pct: {metrics.healthScore}">
+              <svg viewBox="0 0 36 36">
+                <path class="mt-ring-bg" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" />
+                <path class="mt-ring-fill" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
+                  stroke-dasharray="{metrics.healthScore}, 100" />
+              </svg>
+              <span class="mt-score-num">{metrics.healthScore}</span>
+            </div>
+            <div class="mt-dash-label" style="color: {metrics.healthColor}">{metrics.healthLabel}</div>
+          {:else}
+            <div class="mt-score-ring mt-score-na">
+              <span class="mt-score-num" style="color: #9ca3af">—</span>
+            </div>
+            <div class="mt-dash-label" style="color: #9ca3af">No Data</div>
+          {/if}
+        </div>
+
+        <!-- Hours -->
+        <div class="mt-dash-card mt-dash-hours">
+          <div class="mt-dash-kpi-label">Hours</div>
+          <div class="mt-dash-kpi-value">
+            {#if metrics.hourBudget > 0}
+              <span class="mt-hours-used">{metrics.hoursUsed.toLocaleString()}</span>
+              <span class="mt-hours-sep">/</span>
+              <span class="mt-hours-budget">{metrics.hourBudget.toLocaleString()}</span>
+            {:else}
+              <span class="mt-hours-na">—</span>
+            {/if}
+          </div>
+          {#if metrics.hourBudget > 0}
+            <div class="mt-hours-bar">
+              <div class="mt-hours-fill" style="width: {Math.min(metrics.hourPct, 100)}%; background: {metrics.hourPct > 100 ? '#dc2626' : metrics.hourPct > 85 ? '#f59e0b' : '#16a34a'}"></div>
+            </div>
+            <div class="mt-hours-pct" style="color: {metrics.hourPct > 100 ? '#dc2626' : metrics.hourPct > 85 ? '#f59e0b' : 'inherit'}">{metrics.hourPct}%</div>
+          {/if}
+        </div>
+
+        <!-- Crew — stacked avatar faces -->
+        <!-- svelte-ignore a11y-click-events-have-key-events -->
+        <!-- svelte-ignore a11y-no-static-element-interactions -->
+        <div class="mt-dash-card mt-dash-crew" on:click={() => crewExpanded = !crewExpanded}>
+          <div class="mt-dash-kpi-label">Crew <span class="mt-crew-count-badge">{metrics.crewCount}</span></div>
+          {#if metrics.crewMembers && metrics.crewMembers.length > 0}
+            <div class="mt-avatar-stack">
+              {#each metrics.crewMembers.slice(0, 6) as member, i}
+                {#if member.photoUrl}
+                  <img
+                    class="mt-avatar-face"
+                    src={member.photoUrl}
+                    alt="{member.firstName} {member.lastName}"
+                    title="{member.firstName} {member.lastName}{member.classification ? ` — ${member.classification}` : ''}"
+                    style="z-index: {metrics.crewMembers.length - i}"
+                  />
+                {:else}
+                  <div
+                    class="mt-avatar-face mt-avatar-initials"
+                    title="{member.firstName} {member.lastName}{member.classification ? ` — ${member.classification}` : ''}"
+                    style="z-index: {metrics.crewMembers.length - i}"
+                  >{member.firstName?.[0]}{member.lastName?.[0]}</div>
+                {/if}
+              {/each}
+              {#if metrics.crewMembers.length > 6}
+                <div class="mt-avatar-face mt-avatar-more" style="z-index: 0">+{metrics.crewMembers.length - 6}</div>
+              {/if}
+            </div>
+          {:else}
+            <div class="mt-dash-kpi-value"><span class="mt-crew-count">{metrics.crewCount}</span></div>
+          {/if}
+          {#if metrics.foremanName}
+            <div class="mt-crew-foreman" title={metrics.foremanName}>
+              <svg class="mt-crew-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0" /></svg>
+              {metrics.foremanName}
+            </div>
+          {/if}
+        </div>
+
+        <!-- CPI -->
+        <div class="mt-dash-card mt-dash-cpi" title="Cost Performance Index = Earned Value ÷ Actual Cost. CPI ≥ 1.0 means on/under budget. CPI 0.9–1.0 is a warning. CPI &lt; 0.9 means significantly over budget.">
+          <div class="mt-dash-kpi-label">CPI</div>
+          {#if metrics.cpi !== null}
+            <div class="mt-dash-kpi-value">
+              <span class="mt-cpi-value" style="color: {metrics.cpi >= 1.0 ? '#16a34a' : metrics.cpi >= 0.9 ? '#f59e0b' : '#dc2626'}">{metrics.cpi.toFixed(2)}</span>
+            </div>
+            <div class="mt-cpi-hint">{metrics.cpi >= 1.0 ? 'On track' : metrics.cpi >= 0.9 ? 'Watch' : 'Behind'}</div>
+          {:else}
+            <div class="mt-dash-kpi-value"><span class="mt-cpi-na">—</span></div>
+          {/if}
+        </div>
+
+        <!-- Completion -->
+        {#if metrics.pctComplete !== null}
+          <div class="mt-dash-card mt-dash-pct">
+            <div class="mt-dash-kpi-label">Complete</div>
+            <div class="mt-dash-kpi-value">
+              <span class="mt-pct-value">{Math.round(metrics.pctComplete)}%</span>
+            </div>
+          </div>
+        {/if}
+      </div>
+
+      <!-- Crew Popout Panel (outside mt-dash flex to avoid layout disruption) -->
+      {#if crewExpanded && metrics.crewMembers && metrics.crewMembers.length > 0}
+        <!-- svelte-ignore a11y-click-events-have-key-events -->
+        <!-- svelte-ignore a11y-no-static-element-interactions -->
+        <div class="mt-crew-popout-anchor">
+          <div class="mt-crew-popout" on:click|stopPropagation>
+            <div class="mt-crew-popout-header">
+              <span>Crew ({metrics.crewMembers.length})</span>
+              <button class="mt-crew-popout-close" on:click={() => crewExpanded = false}>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+              </button>
+            </div>
+            <div class="mt-crew-popout-list">
+              {#each metrics.crewMembers as member}
+                <div class="mt-crew-popout-row">
+                  {#if member.photoUrl}
+                    <img class="mt-crew-popout-avatar" src={member.photoUrl} alt="{member.firstName}" />
+                  {:else}
+                    <div class="mt-crew-popout-avatar mt-avatar-initials">{member.firstName?.[0]}{member.lastName?.[0]}</div>
+                  {/if}
+                  <div class="mt-crew-popout-info">
+                    <div class="mt-crew-popout-name">{member.firstName} {member.lastName}</div>
+                    <div class="mt-crew-popout-meta">
+                      {#if member.classification}{member.classification}{/if}
+                      {#if member.role}<span class="mt-crew-popout-role">{member.role}</span>{/if}
+                    </div>
+                  </div>
+                </div>
+              {/each}
+            </div>
+          </div>
+        </div>
+      {/if}
+
+      <!-- Risk Tags -->
+      {#if metrics.risks.length > 0}
+        <div class="mt-risk-row">
+          {#each metrics.risks as risk}
+            <span class="mt-risk-tag">{risk}</span>
+          {/each}
+        </div>
+      {/if}
+    {/if}
+
+    {#if error}
+      <div class="mt-error">{error} <button on:click={() => error = ""}>Dismiss</button></div>
+    {/if}
+
+    <!-- Quick Add -->
+    {#if canEdit}
+      <div class="mt-add">
+        <input
+          class="mt-add-input"
+          type="text"
+          placeholder="Add an item... press Enter"
+          bind:value={newDesc}
+          on:keydown={handleAddKeydown}
+          disabled={adding}
+        />
+        <select class="mt-add-assigned" bind:value={newAssigned}>
+          <option value="">Assigned to...</option>
+          <optgroup label="Employees">
+            {#each employees as emp}
+              <option value="emp:{emp.id}">{emp.firstName} {emp.lastName}</option>
+            {/each}
+          </optgroup>
+          <optgroup label="Roles">
+            <option value="PM">PM</option>
+            <option value="Admin">Admin</option>
+            <option value="Foreman">Foreman</option>
+            <option value="Safety">Safety</option>
+            <option value="Estimator">Estimator</option>
+          </optgroup>
+        </select>
+        <select class="mt-add-priority" bind:value={newPriority}>
+          <option value="low">Low</option>
+          <option value="normal">Normal</option>
+          <option value="high">High</option>
+          <option value="urgent">Urgent</option>
+        </select>
+        <input class="mt-add-due" type="date" bind:value={newDue} />
+        <button class="mt-btn mt-btn-primary mt-add-btn" on:click={addItem} disabled={adding || !newDesc.trim()}>Add</button>
+      </div>
+    {/if}
+
+    <!-- Items Table -->
+    <div class="mt-table-wrap">
+      <table class="mt-table">
+        <thead>
+          <tr>
+            <th class="mt-th-grip"></th>
+            <th class="mt-th-check"></th>
+            <th class="mt-th-pri"></th>
+            <th class="mt-th-desc mt-th-resizable">Item<span class="mt-resize-handle" on:mousedown={onResizeStart}></span></th>
+            <th class="mt-th-assign mt-th-resizable">Assigned<span class="mt-resize-handle" on:mousedown={onResizeStart}></span></th>
+            <th class="mt-th-due mt-th-resizable">Due<span class="mt-resize-handle" on:mousedown={onResizeStart}></span></th>
+            <th class="mt-th-status mt-th-resizable">Status<span class="mt-resize-handle" on:mousedown={onResizeStart}></span></th>
+            <th class="mt-th-actions"></th>
+          </tr>
+        </thead>
+        <tbody>
+          {#each visibleItems as item, idx (item.id)}
+            <!-- svelte-ignore a11y-no-static-element-interactions -->
+            <tr
+              class="mt-row {item.status === 'done' ? 'mt-row-done' : ''} {isOverdue(item.dueDate) && item.status === 'open' ? 'mt-row-overdue' : ''} {isStale(item) ? 'mt-row-stale' : ''} {dragOverIdx === idx && dragIdx !== idx ? 'mt-row-dragover' : ''} {dragIdx === idx ? 'mt-row-dragging' : ''}"
+              on:dragover={(e) => onDragOver(e, idx)}
+              on:dragleave={onDragLeave}
+              on:drop={(e) => onDrop(e, idx)}
+            >
+              <!-- Drag grip — only the handle is draggable, not the whole row -->
+              <td class="mt-td-grip">
+                {#if canEdit && item.status === 'open'}
+                  <!-- svelte-ignore a11y-no-static-element-interactions -->
+                  <div
+                    class="mt-drag-handle"
+                    title="Drag to reorder"
+                    draggable="true"
+                    on:dragstart={(e) => onDragStart(e, idx)}
+                    on:dragend={onDragEnd}
+                  >
+                    <svg viewBox="0 0 24 24" fill="currentColor"><circle cx="9" cy="6" r="1.5"/><circle cx="15" cy="6" r="1.5"/><circle cx="9" cy="12" r="1.5"/><circle cx="15" cy="12" r="1.5"/><circle cx="9" cy="18" r="1.5"/><circle cx="15" cy="18" r="1.5"/></svg>
+                  </div>
+                {/if}
+              </td>
+
+              <!-- Checkbox -->
+              <td class="mt-td-check">
+                {#if canEdit}
+                  <button class="mt-check" on:click={() => toggleItem(item)}>
+                    {#if item.status === "done"}
+                      <svg viewBox="0 0 24 24" fill="currentColor"><path d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                    {:else}
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="9" /></svg>
+                    {/if}
+                  </button>
+                {/if}
+              </td>
+
+              <!-- Priority dot (click to cycle) -->
+              <td class="mt-td-pri">
+                {#if canEdit}
+                  <button class="mt-pri-btn" title="{item.priority} — click to change" on:click={() => cyclePriority(item)}>
+                    <span class="mt-priority-dot" style="background:{priorityDot(item.priority)}"></span>
+                  </button>
+                {:else}
+                  <span class="mt-priority-dot" style="background:{priorityDot(item.priority)}"></span>
+                {/if}
+              </td>
+
+              <!-- Description (editable) -->
+              <td class="mt-td-desc">
+                {#if canEdit}
+                  <input
+                    class="mt-inline-input mt-inline-desc"
+                    type="text"
+                    value={item.description}
+                    on:blur={(e) => { if (e.currentTarget.value !== item.description) saveField(item, 'description', e.currentTarget.value); }}
+                    on:keydown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }}
+                  />
+                {:else}
+                  <span class="mt-cell-text">{item.description}</span>
+                {/if}
+                {#if isStale(item)}
+                  <span class="mt-stale-tag">{staleDays(item)}</span>
+                {/if}
+              </td>
+
+              <!-- Assigned (editable dropdown) -->
+              <td class="mt-td-assign">
+                {#if canEdit}
+                  <select
+                    class="mt-inline-select"
+                    value={toDropdownVal(item)}
+                    on:change={(e) => saveField(item, 'assignedRaw', e.currentTarget.value)}
+                  >
+                    <option value="">—</option>
+                    <optgroup label="Employees">
+                      {#each employees as emp}
+                        <option value="emp:{emp.id}">{emp.firstName} {emp.lastName}</option>
+                      {/each}
+                    </optgroup>
+                    <optgroup label="Roles">
+                      <option value="PM">PM</option>
+                      <option value="Admin">Admin</option>
+                      <option value="Foreman">Foreman</option>
+                      <option value="Safety">Safety</option>
+                      <option value="Estimator">Estimator</option>
+                    </optgroup>
+                  </select>
+                {:else}
+                  <span class="mt-cell-text">{item.assignedName || item.assignedTo || '—'}</span>
+                {/if}
+              </td>
+
+              <!-- Due date -->
+              <td class="mt-td-due">
+                {#if canEdit}
+                  <input
+                    class="mt-inline-input mt-inline-date"
+                    type="date"
+                    value={item.dueDate || ''}
+                    on:change={(e) => saveField(item, 'dueDate', e.currentTarget.value || null)}
+                  />
+                {:else if item.dueDate}
+                  <span class="{isOverdue(item.dueDate) && item.status === 'open' ? 'mt-cell-overdue' : ''}">{fmtDue(item.dueDate)}</span>
+                {/if}
+              </td>
+
+              <!-- Status info -->
+              <td class="mt-td-status">
+                {#if item.status === 'done' && item.completedAt}
+                  <span class="mt-completed-info">{fmtCompleted(item.completedAt)}</span>
+                  {#if item.completedBy}<span class="mt-completed-by">{item.completedBy}</span>{/if}
+                {:else if item.dueDate && isOverdue(item.dueDate)}
+                  <span class="mt-cell-overdue">{relDue(item.dueDate)}</span>
+                {:else if item.dueDate}
+                  <span class="mt-cell-rel">{relDue(item.dueDate)}</span>
+                {/if}
+              </td>
+
+              <!-- Actions: notes toggle + delete -->
+              <td class="mt-td-actions">
+                <button class="mt-action-btn mt-action-notes {item.notes ? 'has-notes' : ''}" on:click={() => toggleNotes(item.id)} title={expandedNotes.has(item.id) ? 'Hide notes' : 'Notes'}>
+                  <svg class="mt-action-icon {expandedNotes.has(item.id) ? 'mt-action-active' : ''}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" /></svg>
+                </button>
+                {#if canEdit}
+                  {#if confirmDeleteId === item.id}
+                    <span class="mt-confirm-delete">
+                      <button class="mt-confirm-yes" on:click={() => deleteItem(item.id)} title="Confirm delete">Yes</button>
+                      <button class="mt-confirm-no" on:click={() => confirmDeleteId = null} title="Cancel">No</button>
+                    </span>
+                  {:else}
+                    <button class="mt-action-btn mt-action-del" on:click={() => confirmDeleteId = item.id} title="Delete">
+                      <svg class="mt-action-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" /></svg>
+                    </button>
+                  {/if}
+                {/if}
+              </td>
+            </tr>
+
+            <!-- Notes expand row -->
+            {#if expandedNotes.has(item.id)}
+              <tr class="mt-notes-row">
+                <td colspan="8">
+                  {#if canEdit}
+                    <textarea
+                      class="mt-notes-area"
+                      value={item.notes || ''}
+                      rows="2"
+                      placeholder="Add notes..."
+                      on:blur={(e) => { const val = e.currentTarget.value.trim(); if (val !== (item.notes || '')) saveField(item, 'notes', val || null); }}
+                    ></textarea>
+                  {:else if item.notes}
+                    <div class="mt-notes-body">{item.notes}</div>
+                  {:else}
+                    <div class="mt-notes-body mt-notes-empty">No notes</div>
+                  {/if}
+                </td>
+              </tr>
+            {/if}
+          {/each}
+        </tbody>
+      </table>
+
+      {#if visibleItems.length === 0}
+        <div class="mt-list-empty">
+          {showDone ? "No items for this job" : "No open items — all clear"}
+        </div>
+      {/if}
+    </div>
+  {/if}
+</div>
+
+<!-- Template Modal (Apply) -->
+{#if showTemplateModal}
+  <!-- svelte-ignore a11y-click-events-have-key-events -->
+  <!-- svelte-ignore a11y-no-static-element-interactions -->
+  <div class="mt-overlay" on:click={() => showTemplateModal = false}>
+    <div class="mt-modal" on:click|stopPropagation>
+      <h3 class="mt-modal-title">Load Template</h3>
+      <p class="mt-modal-sub">Seed this job with standard action items from a template.</p>
+      <div class="mt-modal-body">
+        <div class="mt-field">
+          <label for="tpl">Template</label>
+          <select id="tpl" bind:value={selectedTemplateId}>
+            <option value="">Select a template...</option>
+            {#each templates as t}
+              <option value={String(t.id)}>{t.name}{t.description ? ` — ${t.description}` : ""}</option>
+            {/each}
+          </select>
+        </div>
+      </div>
+      <div class="mt-modal-foot">
+        {#if canEdit}
+          <button class="mt-btn mt-btn-manage" on:click={openManageTemplates}>
+            <svg class="mt-btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.325.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 011.37.49l1.296 2.247a1.125 1.125 0 01-.26 1.431l-1.003.827c-.293.241-.438.613-.43.992a7.723 7.723 0 010 .255c-.008.378.137.75.43.991l1.004.827c.424.35.534.955.26 1.43l-1.298 2.247a1.125 1.125 0 01-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.47 6.47 0 01-.22.128c-.331.183-.581.495-.644.869l-.213 1.281c-.09.543-.56.941-1.11.941h-2.594c-.55 0-1.019-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 01-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 01-1.369-.49l-1.297-2.247a1.125 1.125 0 01.26-1.431l1.004-.827c.292-.24.437-.613.43-.991a6.932 6.932 0 010-.255c.007-.38-.138-.751-.43-.992l-1.004-.827a1.125 1.125 0 01-.26-1.43l1.297-2.247a1.125 1.125 0 011.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.086.22-.128.332-.183.582-.495.644-.869l.214-1.28z" /><path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
+            Manage
+          </button>
+        {/if}
+        <div class="mt-modal-spacer"></div>
+        <button class="mt-btn" on:click={() => showTemplateModal = false}>Cancel</button>
+        <button class="mt-btn mt-btn-primary" on:click={applyTemplate} disabled={!selectedTemplateId || applyingTemplate}>
+          {applyingTemplate ? "Loading..." : "Apply"}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- Template Manager Modal -->
+{#if showManageTemplates}
+  <!-- svelte-ignore a11y-click-events-have-key-events -->
+  <!-- svelte-ignore a11y-no-static-element-interactions -->
+  <div class="mt-overlay" on:click={closeManageTemplates}>
+    <div class="mt-modal mt-modal-wide" on:click|stopPropagation>
+      <div class="mt-mgr-header">
+        <h3 class="mt-modal-title">Manage Templates</h3>
+        <button class="mt-mgr-close" on:click={closeManageTemplates}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+        </button>
+      </div>
+
+      <div class="mt-mgr-body">
+        <!-- Left: template list -->
+        <div class="mt-mgr-sidebar">
+          <div class="mt-mgr-sidebar-header">
+            <span class="mt-mgr-sidebar-label">Templates</span>
+          </div>
+
+          <div class="mt-mgr-list">
+            {#each templates as t (t.id)}
+              <button
+                class="mt-mgr-item {managingTemplate?.id === t.id ? 'mt-mgr-item-active' : ''}"
+                on:click={() => selectManageTemplate(t)}
+              >
+                <span class="mt-mgr-item-name">{t.name}</span>
+                {#if t.description}<span class="mt-mgr-item-desc">{t.description}</span>{/if}
+              </button>
+            {/each}
+            {#if templates.length === 0}
+              <div class="mt-mgr-empty">No templates yet</div>
+            {/if}
+          </div>
+
+          <!-- Create new -->
+          <div class="mt-mgr-create">
+            <input type="text" class="mt-mgr-create-input" placeholder="New template name..." bind:value={newTemplateName} on:keydown={(e) => { if (e.key === 'Enter') createTemplate(); }} />
+            <input type="text" class="mt-mgr-create-input mt-mgr-create-desc" placeholder="Description (optional)" bind:value={newTemplateDesc} on:keydown={(e) => { if (e.key === 'Enter') createTemplate(); }} />
+            <button class="mt-btn mt-btn-primary mt-btn-sm" on:click={createTemplate} disabled={!newTemplateName.trim() || creatingTemplate}>
+              {creatingTemplate ? "..." : "Create"}
+            </button>
+          </div>
+        </div>
+
+        <!-- Right: template detail -->
+        <div class="mt-mgr-detail">
+          {#if !managingTemplate}
+            <div class="mt-mgr-detail-empty">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" style="width:48px;height:48px;opacity:0.15"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" /></svg>
+              <span>Select a template to manage its items</span>
+            </div>
+          {:else}
+            <!-- Template header -->
+            <div class="mt-mgr-detail-header">
+              {#if editingTemplateName}
+                <div class="mt-mgr-edit-name">
+                  <input type="text" bind:value={editTemplateName} class="mt-mgr-name-input" on:keydown={(e) => { if (e.key === 'Enter') saveTemplateName(); if (e.key === 'Escape') editingTemplateName = false; }} />
+                  <input type="text" bind:value={editTemplateDesc} class="mt-mgr-name-input mt-mgr-desc-input" placeholder="Description..." on:keydown={(e) => { if (e.key === 'Enter') saveTemplateName(); }} />
+                  <button class="mt-btn mt-btn-primary mt-btn-sm" on:click={saveTemplateName}>Save</button>
+                  <button class="mt-btn mt-btn-sm" on:click={() => editingTemplateName = false}>Cancel</button>
+                </div>
+              {:else}
+                <div class="mt-mgr-title-row">
+                  <div>
+                    <h4 class="mt-mgr-title">{managingTemplate.name}</h4>
+                    {#if managingTemplate.description}<p class="mt-mgr-subtitle">{managingTemplate.description}</p>{/if}
+                  </div>
+                  <div class="mt-mgr-title-actions">
+                    <button class="mt-btn mt-btn-sm" on:click={startEditTemplateName} title="Rename">
+                      <svg class="mt-btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931z" /></svg>
+                    </button>
+                    <button class="mt-btn mt-btn-sm mt-btn-danger" on:click={() => { if (managingTemplate && confirm(`Delete "${managingTemplate.name}"?`)) deleteTemplate(managingTemplate); }} title="Delete template">
+                      <svg class="mt-btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" /></svg>
+                    </button>
+                  </div>
+                </div>
+              {/if}
+            </div>
+
+            <!-- Items list -->
+            {#if managingItemsLoading}
+              <div class="mt-mgr-items-loading"><span class="loading loading-dots loading-sm text-primary"></span></div>
+            {:else}
+              <!-- Add item row -->
+              <div class="mt-mgr-add-item">
+                <input
+                  type="text"
+                  class="mt-mgr-add-input"
+                  placeholder="Add template item... press Enter"
+                  bind:value={newTplItemDesc}
+                  on:keydown={handleTplItemKeydown}
+                  disabled={addingTplItem}
+                />
+                <select class="mt-mgr-add-select" bind:value={newTplItemAssigned}>
+                  <option value="">Role...</option>
+                  <option value="PM">PM</option>
+                  <option value="Admin">Admin</option>
+                  <option value="Foreman">Foreman</option>
+                  <option value="Safety">Safety</option>
+                  <option value="Estimator">Estimator</option>
+                </select>
+                <select class="mt-mgr-add-select mt-mgr-add-pri" bind:value={newTplItemPriority}>
+                  <option value="low">Low</option>
+                  <option value="normal">Normal</option>
+                  <option value="high">High</option>
+                  <option value="urgent">Urgent</option>
+                </select>
+                <button class="mt-btn mt-btn-primary mt-btn-sm" on:click={addTemplateItem} disabled={!newTplItemDesc.trim() || addingTplItem}>Add</button>
+              </div>
+
+              <!-- Items -->
+              <div class="mt-mgr-items">
+                {#each managingItems as item (item.id)}
+                  {#if editTplItem?.id === item.id}
+                    <div class="mt-mgr-item-row mt-mgr-item-editing">
+                      <input type="text" class="mt-mgr-edit-input" bind:value={editTplItemDesc} on:keydown={(e) => { if (e.key === 'Enter') saveEditTplItem(); if (e.key === 'Escape') editTplItem = null; }} />
+                      <select class="mt-mgr-add-select" bind:value={editTplItemAssigned}>
+                        <option value="">Role...</option>
+                        <option value="PM">PM</option>
+                        <option value="Admin">Admin</option>
+                        <option value="Foreman">Foreman</option>
+                        <option value="Safety">Safety</option>
+                        <option value="Estimator">Estimator</option>
+                      </select>
+                      <select class="mt-mgr-add-select mt-mgr-add-pri" bind:value={editTplItemPriority}>
+                        <option value="low">Low</option>
+                        <option value="normal">Normal</option>
+                        <option value="high">High</option>
+                        <option value="urgent">Urgent</option>
+                      </select>
+                      <button class="mt-btn mt-btn-primary mt-btn-sm" on:click={saveEditTplItem}>Save</button>
+                      <button class="mt-btn mt-btn-sm" on:click={() => editTplItem = null}>Cancel</button>
+                    </div>
+                  {:else}
+                    <div class="mt-mgr-item-row">
+                      <span class="mt-priority-dot" style="background:{priorityDot(item.priority)}"></span>
+                      <span class="mt-mgr-item-text">{item.description}</span>
+                      {#if item.assignedTo}<span class="mt-meta-tag">{item.assignedTo}</span>{/if}
+                      <div class="mt-mgr-item-actions">
+                        <button class="mt-mgr-action" on:click={() => startEditTplItem(item)} title="Edit">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931z" /></svg>
+                        </button>
+                        <button class="mt-mgr-action mt-mgr-action-del" on:click={() => deleteTplItem(item.id)} title="Remove">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+                        </button>
+                      </div>
+                    </div>
+                  {/if}
+                {/each}
+                {#if managingItems.length === 0}
+                  <div class="mt-mgr-no-items">No items yet — add one above</div>
+                {/if}
+              </div>
+            {/if}
+          {/if}
+        </div>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<style>
+  .mt-page { max-width: 100%; display: flex; flex-direction: column; gap: 12px; }
+  .mt-loading { display: flex; justify-content: center; padding: 60px 0; }
+  .mt-empty { text-align: center; padding: 60px 0; color: oklch(var(--bc) / 0.3); font-size: 14px; }
+
+  /* ── Navigator ── */
+  .mt-nav {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 0 12px;
+    max-width: 640px;
+    margin: 0 auto;
+    width: 100%;
+  }
+  .mt-arrow {
+    width: 34px; height: 34px;
+    display: flex; align-items: center; justify-content: center;
+    border-radius: 10px;
+    border: 1px solid oklch(var(--bc) / 0.1);
+    background: oklch(var(--b1));
+    color: oklch(var(--bc) / 0.45);
+    cursor: pointer;
+    transition: all 0.15s;
+    flex-shrink: 0;
+  }
+  .mt-arrow:hover:not(:disabled) { background: oklch(var(--bc) / 0.04); color: oklch(var(--bc) / 0.8); border-color: oklch(var(--bc) / 0.15); }
+  .mt-arrow:disabled { opacity: 0.2; cursor: default; }
+  .mt-arrow svg { width: 18px; height: 18px; }
+
+  .mt-nav-center {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
+  }
+  .mt-job-select {
+    font-size: 17px; font-weight: 700;
+    letter-spacing: -0.2px;
+    color: oklch(var(--bc));
+    background: none; border: none;
+    text-align: center;
+    text-align-last: center;
+    cursor: pointer;
+    padding: 2px 4px;
+    -webkit-appearance: none;
+    appearance: none;
+    max-width: 100%;
+    line-height: 1.3;
+    width: 100%;
+  }
+  .mt-job-select:focus { outline: none; }
+  .mt-job-select:hover { color: oklch(var(--p)); }
+
+  .mt-nav-sub {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  .mt-nav-dot {
+    width: 3px; height: 3px;
+    border-radius: 50%;
+    background: oklch(var(--bc) / 0.15);
+    flex-shrink: 0;
+  }
+  .mt-nav-count {
+    font-size: 11px;
+    color: oklch(var(--bc) / 0.35);
+    font-weight: 500;
+  }
+  .mt-overdue-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 1px 7px;
+    border-radius: 100px;
+    font-size: 10px;
+    font-weight: 600;
+    background: oklch(var(--er) / 0.08);
+    color: oklch(var(--er) / 0.8);
+  }
+
+  /* ── Status Chip (select or span) ── */
+  .mt-status-chip {
+    font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.4px;
+    padding: 3px 10px;
+    border-radius: 100px;
+    border: 1px solid transparent;
+    cursor: pointer; outline: none;
+    -webkit-appearance: none; appearance: none;
+    transition: all 0.15s;
+    line-height: 1;
+    text-align: center;
+    text-align-last: center;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 20px;
+  }
+  .mt-status-chip:hover { filter: brightness(0.95); }
+  .mt-status-chip:disabled { opacity: 0.5; cursor: default; }
+  .mt-status-active { color: #16a34a; background: rgba(22,163,74,0.08); border-color: rgba(22,163,74,0.12); }
+  .mt-status-planning { color: #3b82f6; background: rgba(59,130,246,0.08); border-color: rgba(59,130,246,0.12); }
+  .mt-status-completed { color: #8b5cf6; background: rgba(139,92,246,0.08); border-color: rgba(139,92,246,0.12); }
+  .mt-status-closed { color: #9ca3af; background: rgba(156,163,175,0.08); border-color: rgba(156,163,175,0.12); }
+
+  /* ── Toolbar ── */
+  .mt-toolbar {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 0 2px 8px;
+  }
+  .mt-toolbar-right { display: flex; gap: 4px; }
+  .mt-toggle {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 11px; color: oklch(var(--bc) / 0.35); cursor: pointer; user-select: none;
+    font-weight: 500;
+  }
+  .mt-toggle input { width: 13px; height: 13px; accent-color: oklch(var(--p)); }
+  .mt-btn {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 5px 10px; border-radius: 8px; font-size: 11px; font-weight: 500;
+    border: 1px solid oklch(var(--bc) / 0.06);
+    background: oklch(var(--b1)); color: oklch(var(--bc) / 0.4);
+    cursor: pointer; transition: all 0.15s; white-space: nowrap;
+    letter-spacing: 0.1px;
+  }
+  .mt-btn:hover { background: oklch(var(--bc) / 0.03); color: oklch(var(--bc) / 0.6); border-color: oklch(var(--bc) / 0.1); }
+  .mt-btn-primary { background: oklch(var(--p)); color: oklch(var(--pc)); border-color: transparent; }
+  .mt-btn-primary:hover { opacity: 0.9; }
+  .mt-btn-primary:disabled { opacity: 0.4; cursor: default; }
+  .mt-btn-icon { width: 13px; height: 13px; flex-shrink: 0; opacity: 0.6; }
+
+  .mt-error {
+    background: oklch(var(--er) / 0.08); color: oklch(var(--er));
+    padding: 8px 14px; border-radius: 10px; font-size: 12px;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .mt-error button { background: none; border: none; cursor: pointer; color: oklch(var(--er)); font-weight: 600; font-size: 11px; }
+
+  /* ── Quick Add ── */
+  .mt-add {
+    display: flex; gap: 6px; align-items: center; flex-wrap: wrap;
+    background: oklch(var(--bc) / 0.015);
+    border: 1px solid oklch(var(--bc) / 0.05);
+    border-radius: 12px;
+    padding: 8px 10px;
+  }
+  .mt-add-input { flex: 2; min-width: 160px; }
+  .mt-add-assigned { flex: 1; min-width: 100px; }
+  .mt-add-priority { width: 90px; }
+  .mt-add-due { width: 130px; }
+  .mt-add input, .mt-add select {
+    padding: 6px 10px; border: 1px solid oklch(var(--bc) / 0.08);
+    border-radius: 8px; font-size: 12px; background: oklch(var(--b1)); color: oklch(var(--bc));
+    outline: none; transition: border-color 0.15s;
+  }
+  .mt-add input:focus, .mt-add select:focus { border-color: oklch(var(--p) / 0.4); }
+  .mt-add-btn { flex-shrink: 0; }
+
+  /* ── Table View ── */
+  .mt-table-wrap {
+    border: 1px solid oklch(var(--bc) / 0.05);
+    border-radius: 14px;
+    overflow-x: auto; -webkit-overflow-scrolling: touch;
+    background: oklch(var(--b1));
+  }
+  .mt-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+    table-layout: fixed;
+  }
+  .mt-table thead { background: oklch(var(--bc) / 0.02); }
+  .mt-table th {
+    padding: 6px 8px;
+    font-size: 9px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: oklch(var(--bc) / 0.35);
+    text-align: left;
+    border-bottom: 1px solid oklch(var(--bc) / 0.06);
+    white-space: nowrap;
+    position: relative;
+  }
+  .mt-th-resizable { overflow: hidden; }
+  .mt-resize-handle {
+    position: absolute; right: 0; top: 0; bottom: 0; width: 5px;
+    cursor: col-resize; background: transparent;
+    transition: background 0.15s;
+  }
+  .mt-resize-handle:hover, .mt-resize-handle:active {
+    background: oklch(var(--p) / 0.2);
+  }
+  .mt-th-grip { width: 20px; }
+  .mt-th-check { width: 28px; }
+  .mt-th-pri { width: 20px; }
+  .mt-th-desc { }
+  .mt-th-assign { width: 130px; }
+  .mt-th-due { width: 110px; }
+  .mt-th-status { width: 90px; }
+  .mt-th-actions { width: 80px; }
+
+  .mt-row {
+    transition: background 0.1s;
+  }
+  .mt-row:hover { background: oklch(var(--bc) / 0.015); }
+  .mt-row td {
+    padding: 6px 8px;
+    border-bottom: 1px solid oklch(var(--bc) / 0.04);
+    vertical-align: middle;
+  }
+  .mt-row:last-child td { border-bottom: none; }
+  .mt-row-done { opacity: 0.45; }
+  .mt-row-overdue { background: oklch(var(--er) / 0.03); }
+  .mt-row-stale { border-left: 3px solid oklch(var(--wa, 0.8 0.12 75) / 0.6); }
+  .mt-row-dragging { opacity: 0.4; }
+  .mt-row-dragover { box-shadow: inset 0 -2px 0 oklch(var(--p)); }
+
+  .mt-td-grip { padding: 0 2px !important; }
+  .mt-td-check { padding: 0 4px !important; }
+  .mt-td-pri { padding: 0 4px !important; text-align: center; }
+
+  .mt-check {
+    width: 20px; height: 20px;
+    display: flex; align-items: center; justify-content: center;
+    border: none; background: none; cursor: pointer;
+    color: oklch(var(--bc) / 0.25); transition: color 0.15s;
+  }
+  .mt-check:hover { color: oklch(var(--p)); }
+  .mt-row-done .mt-check { color: oklch(var(--su)); }
+  .mt-check svg { width: 18px; height: 18px; }
+
+  .mt-pri-btn {
+    border: none; background: none; cursor: pointer; padding: 4px;
+    display: flex; align-items: center; justify-content: center;
+    border-radius: 4px; transition: background 0.1s;
+  }
+  .mt-pri-btn:hover { background: oklch(var(--bc) / 0.06); }
+  .mt-priority-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+
+  /* Inline editable fields */
+  .mt-inline-input, .mt-inline-select {
+    width: 100%;
+    padding: 3px 6px;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    font-size: 12px;
+    background: transparent;
+    color: oklch(var(--bc));
+    outline: none;
+    font-family: inherit;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .mt-inline-input:hover, .mt-inline-select:hover {
+    background: oklch(var(--bc) / 0.02);
+  }
+  .mt-inline-input:focus, .mt-inline-select:focus {
+    border-color: oklch(var(--p) / 0.3);
+    background: oklch(var(--b1));
+  }
+  .mt-inline-desc { font-weight: 500; }
+  .mt-row-done .mt-inline-desc { text-decoration: line-through; }
+  .mt-inline-date { width: 110px; font-size: 11px; }
+  .mt-inline-select { font-size: 11px; cursor: pointer; }
+
+  .mt-cell-text { font-size: 12px; color: oklch(var(--bc) / 0.7); }
+  .mt-cell-overdue { color: oklch(var(--er)); font-weight: 600; font-size: 10px; }
+  .mt-cell-rel { font-size: 10px; color: oklch(var(--bc) / 0.4); }
+  .mt-completed-info { font-size: 10px; color: oklch(var(--su) / 0.7); font-weight: 500; display: block; }
+  .mt-completed-by { font-size: 9px; color: oklch(var(--bc) / 0.35); display: block; }
+
+  .mt-td-desc { position: relative; }
+
+  /* Drag handle — always visible since it's the only drag target */
+  .mt-drag-handle {
+    width: 16px; height: 20px;
+    display: flex; align-items: center; justify-content: center;
+    cursor: grab; color: oklch(var(--bc) / 0.15);
+    transition: color 0.15s;
+  }
+  .mt-drag-handle:hover { color: oklch(var(--bc) / 0.4); }
+  .mt-drag-handle:active { cursor: grabbing; color: oklch(var(--bc) / 0.5); }
+  .mt-drag-handle svg { width: 12px; height: 12px; }
+
+  .mt-stale-tag {
+    display: inline-flex; align-items: center; gap: 3px;
+    padding: 1px 5px; border-radius: 4px; margin-left: 4px;
+    font-size: 8px; font-weight: 700; letter-spacing: 0.2px;
+    background: oklch(var(--wa, 0.8 0.12 75) / 0.1);
+    color: oklch(var(--wa, 0.8 0.12 75));
+    text-transform: uppercase;
+    flex-shrink: 0; vertical-align: middle;
+  }
+  .mt-stale-tag::before {
+    content: "";
+    width: 4px; height: 4px; border-radius: 50%;
+    background: oklch(var(--wa, 0.8 0.12 75));
+  }
+
+  .mt-stale-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 1px 7px;
+    border-radius: 100px;
+    font-size: 10px;
+    font-weight: 600;
+    background: oklch(var(--wa, 0.8 0.12 75) / 0.08);
+    color: oklch(var(--wa, 0.8 0.12 75) / 0.8);
+  }
+
+  /* Action buttons */
+  .mt-action-btn {
+    width: 22px; height: 22px;
+    display: inline-flex; align-items: center; justify-content: center;
+    border: none; background: none; cursor: pointer;
+    color: oklch(var(--bc) / 0.25); border-radius: 4px;
+    transition: all 0.15s;
+  }
+  .mt-action-btn:hover { background: oklch(var(--bc) / 0.06); color: oklch(var(--bc) / 0.6); }
+  .mt-action-notes.has-notes { color: oklch(var(--p) / 0.5); }
+  .mt-action-notes.has-notes:hover { color: oklch(var(--p)); }
+  .mt-action-del { color: oklch(var(--bc) / 0.18); }
+  .mt-action-del:hover { color: oklch(var(--er)); background: oklch(var(--er) / 0.06); }
+  .mt-action-icon { width: 13px; height: 13px; transition: transform 0.2s; }
+  .mt-action-active { transform: rotate(180deg); }
+  .mt-td-actions { display: flex; gap: 2px; align-items: center; padding: 0 4px !important; }
+
+  /* Confirm delete inline */
+  .mt-confirm-delete {
+    display: inline-flex; gap: 3px; align-items: center; font-size: 10px; font-weight: 600;
+  }
+  .mt-confirm-yes, .mt-confirm-no {
+    border: none; border-radius: 4px; padding: 2px 6px; cursor: pointer;
+    font-size: 10px; font-weight: 600; transition: all 0.1s;
+  }
+  .mt-confirm-yes { background: oklch(var(--er) / 0.12); color: oklch(var(--er)); }
+  .mt-confirm-yes:hover { background: oklch(var(--er) / 0.2); }
+  .mt-confirm-no { background: oklch(var(--bc) / 0.06); color: oklch(var(--bc) / 0.5); }
+  .mt-confirm-no:hover { background: oklch(var(--bc) / 0.1); }
+
+  /* Notes row */
+  .mt-notes-row td {
+    padding: 0 12px 8px 62px;
+    border-bottom: 1px solid oklch(var(--bc) / 0.04);
+    background: oklch(var(--bc) / 0.01);
+  }
+  .mt-notes-area {
+    width: 100%;
+    padding: 6px 8px;
+    border: 1px solid oklch(var(--bc) / 0.08);
+    border-radius: 6px;
+    font-size: 12px;
+    font-family: inherit;
+    color: oklch(var(--bc) / 0.6);
+    background: oklch(var(--b1));
+    outline: none;
+    resize: vertical;
+    line-height: 1.5;
+    transition: border-color 0.15s;
+  }
+  .mt-notes-area:focus { border-color: oklch(var(--p) / 0.3); }
+  .mt-notes-body {
+    padding: 6px 8px;
+    font-size: 12px;
+    color: oklch(var(--bc) / 0.6);
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .mt-notes-empty { color: oklch(var(--bc) / 0.25); font-style: italic; }
+
+  .mt-list-empty {
+    text-align: center; padding: 40px 20px;
+    font-size: 13px; color: oklch(var(--bc) / 0.3);
+  }
+
+  /* ── Modals ── */
+  .mt-overlay {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.25); backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px);
+    z-index: 50; display: flex; align-items: center; justify-content: center; padding: 16px;
+  }
+  .mt-modal {
+    background: oklch(var(--b1)); border-radius: 16px;
+    width: 100%; max-width: 420px;
+    box-shadow: 0 24px 80px rgba(0,0,0,0.15);
+  }
+  .mt-modal-title { font-size: 16px; font-weight: 700; padding: 20px 20px 0; color: oklch(var(--bc)); }
+  .mt-modal-sub { font-size: 12px; color: oklch(var(--bc) / 0.4); padding: 4px 20px 0; }
+  .mt-modal-body { padding: 16px 20px; display: flex; flex-direction: column; gap: 12px; }
+  .mt-modal-row { display: flex; gap: 10px; }
+  .mt-modal-row > * { flex: 1; }
+  .mt-modal-foot { padding: 12px 20px 16px; display: flex; justify-content: flex-end; gap: 8px; }
+
+  .mt-field { display: flex; flex-direction: column; gap: 4px; }
+  .mt-field label {
+    font-size: 11px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.5px; color: oklch(var(--bc) / 0.4);
+  }
+  .mt-field input, .mt-field select, .mt-field textarea {
+    padding: 7px 10px; border: 1px solid oklch(var(--bc) / 0.1);
+    border-radius: 8px; font-size: 13px; background: oklch(var(--b1)); color: oklch(var(--bc));
+    outline: none; transition: border-color 0.15s; font-family: inherit;
+  }
+  .mt-field input:focus, .mt-field select:focus, .mt-field textarea:focus {
+    border-color: oklch(var(--p) / 0.4);
+  }
+  .mt-field textarea { resize: vertical; }
+
+  /* ── Mini Dashboard ── */
+  .mt-dash {
+    display: flex;
+    gap: 8px;
+    padding: 10px 12px;
+    background: oklch(var(--b1));
+    border: 1px solid oklch(var(--bc) / 0.05);
+    border-radius: 14px;
+    overflow-x: auto;
+  }
+  .mt-dash-loading {
+    width: 100%;
+    display: flex; justify-content: center; padding: 8px 0;
+  }
+  .mt-dash-card {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    padding: 8px 6px;
+    border-radius: 10px;
+    background: oklch(var(--bc) / 0.015);
+    transition: background 0.15s;
+  }
+  .mt-dash-card:hover { background: oklch(var(--bc) / 0.03); }
+  .mt-dash-kpi-label {
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: oklch(var(--bc) / 0.35);
+  }
+  .mt-dash-kpi-value {
+    font-size: 20px;
+    font-weight: 700;
+    color: oklch(var(--bc));
+    line-height: 1.2;
+  }
+  .mt-dash-label {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+  }
+
+  /* Health Score Ring */
+  .mt-dash-health { min-width: 80px; max-width: 100px; }
+  .mt-score-ring {
+    position: relative;
+    width: 52px;
+    height: 52px;
+  }
+  .mt-score-ring svg { width: 100%; height: 100%; transform: rotate(-90deg); }
+  .mt-ring-bg {
+    fill: none;
+    stroke: oklch(var(--bc) / 0.06);
+    stroke-width: 3;
+  }
+  .mt-ring-fill {
+    fill: none;
+    stroke: var(--score-color, #3b82f6);
+    stroke-width: 3;
+    stroke-linecap: round;
+    transition: stroke-dasharray 0.6s ease;
+  }
+  .mt-score-num {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 15px;
+    font-weight: 800;
+    color: oklch(var(--bc));
+  }
+  .mt-score-na { width: 52px; height: 52px; }
+
+  /* Hours */
+  .mt-dash-hours { min-width: 120px; }
+  .mt-hours-used { font-size: 18px; }
+  .mt-hours-sep { font-size: 14px; color: oklch(var(--bc) / 0.25); margin: 0 1px; }
+  .mt-hours-budget { font-size: 14px; color: oklch(var(--bc) / 0.4); font-weight: 500; }
+  .mt-hours-na { color: oklch(var(--bc) / 0.2); }
+  .mt-hours-bar {
+    width: 100%;
+    height: 4px;
+    border-radius: 2px;
+    background: oklch(var(--bc) / 0.06);
+    margin-top: 4px;
+    overflow: hidden;
+  }
+  .mt-hours-fill {
+    height: 100%;
+    border-radius: 2px;
+    transition: width 0.5s ease;
+  }
+  .mt-hours-pct {
+    font-size: 10px;
+    font-weight: 600;
+    color: oklch(var(--bc) / 0.4);
+    margin-top: 1px;
+  }
+
+  /* Crew */
+  .mt-dash-crew { min-width: 80px; cursor: pointer; position: relative; }
+  .mt-crew-count { font-size: 22px; }
+  .mt-crew-count-badge {
+    font-size: 9px; font-weight: 700;
+    background: oklch(var(--bc) / 0.08);
+    color: oklch(var(--bc) / 0.5);
+    padding: 1px 5px; border-radius: 6px;
+    margin-left: 2px; vertical-align: middle;
+  }
+  .mt-crew-foreman {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    font-size: 10px;
+    color: oklch(var(--bc) / 0.45);
+    font-weight: 500;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .mt-crew-icon { width: 12px; height: 12px; flex-shrink: 0; }
+
+  /* Avatar Stack */
+  .mt-avatar-stack {
+    display: flex;
+    align-items: center;
+    padding: 4px 0;
+  }
+  .mt-avatar-face {
+    width: 30px; height: 30px;
+    border-radius: 50%;
+    border: 2px solid oklch(var(--b1));
+    object-fit: cover;
+    margin-left: -8px;
+    position: relative;
+    transition: transform 0.15s, margin 0.15s;
+    flex-shrink: 0;
+  }
+  .mt-avatar-face:first-child { margin-left: 0; }
+  .mt-dash-crew:hover .mt-avatar-face { margin-left: -4px; }
+  .mt-dash-crew:hover .mt-avatar-face:first-child { margin-left: 0; }
+  .mt-avatar-initials {
+    display: flex; align-items: center; justify-content: center;
+    font-size: 10px; font-weight: 700;
+    background: oklch(var(--p) / 0.12);
+    color: oklch(var(--p));
+    letter-spacing: -0.3px;
+  }
+  .mt-avatar-more {
+    display: flex; align-items: center; justify-content: center;
+    font-size: 9px; font-weight: 700;
+    background: oklch(var(--bc) / 0.08);
+    color: oklch(var(--bc) / 0.5);
+    margin-left: -8px;
+  }
+
+  /* Crew Popout */
+  .mt-crew-popout-anchor {
+    position: relative;
+    width: 100%;
+    display: flex;
+    justify-content: center;
+  }
+  .mt-crew-popout {
+    position: absolute;
+    top: 0;
+    z-index: 40;
+    background: oklch(var(--b1));
+    border: 1px solid oklch(var(--bc) / 0.1);
+    border-radius: 14px;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.12), 0 2px 8px rgba(0,0,0,0.06);
+    width: 260px;
+    max-height: 300px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    animation: mt-popout-in 0.15s ease-out;
+  }
+  @keyframes mt-popout-in {
+    from { opacity: 0; transform: translateY(-6px) scale(0.97); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
+  }
+  .mt-crew-popout-header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 10px 14px 8px;
+    font-size: 11px; font-weight: 700; color: oklch(var(--bc) / 0.5);
+    text-transform: uppercase; letter-spacing: 0.5px;
+    border-bottom: 1px solid oklch(var(--bc) / 0.06);
+  }
+  .mt-crew-popout-close {
+    width: 20px; height: 20px;
+    display: flex; align-items: center; justify-content: center;
+    border: none; background: none; cursor: pointer;
+    color: oklch(var(--bc) / 0.3); border-radius: 4px;
+    transition: all 0.1s;
+  }
+  .mt-crew-popout-close:hover { background: oklch(var(--bc) / 0.06); color: oklch(var(--bc) / 0.6); }
+  .mt-crew-popout-close svg { width: 12px; height: 12px; }
+  .mt-crew-popout-list {
+    overflow-y: auto;
+    padding: 6px 8px;
+  }
+  .mt-crew-popout-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 6px 8px;
+    border-radius: 8px;
+    transition: background 0.1s;
+  }
+  .mt-crew-popout-row:hover { background: oklch(var(--bc) / 0.03); }
+  .mt-crew-popout-avatar {
+    width: 32px; height: 32px;
+    border-radius: 50%;
+    object-fit: cover;
+    flex-shrink: 0;
+    border: 1px solid oklch(var(--bc) / 0.06);
+  }
+  .mt-crew-popout-info { min-width: 0; flex: 1; }
+  .mt-crew-popout-name {
+    font-size: 12px; font-weight: 600; color: oklch(var(--bc) / 0.8);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .mt-crew-popout-meta {
+    font-size: 10px; color: oklch(var(--bc) / 0.4);
+    display: flex; gap: 6px; align-items: center;
+  }
+  .mt-crew-popout-role {
+    padding: 0 4px;
+    border-radius: 4px;
+    background: oklch(var(--p) / 0.08);
+    color: oklch(var(--p) / 0.7);
+    font-weight: 600;
+    font-size: 9px;
+    text-transform: uppercase;
+  }
+
+  /* CPI */
+  .mt-dash-cpi { min-width: 70px; }
+  .mt-cpi-value { font-size: 22px; }
+  .mt-cpi-na { color: oklch(var(--bc) / 0.2); }
+  .mt-cpi-hint { font-size: 10px; color: oklch(var(--bc) / 0.35); font-weight: 500; }
+
+  /* Percent Complete */
+  .mt-dash-pct { min-width: 70px; }
+  .mt-pct-value { font-size: 22px; color: oklch(var(--p)); }
+
+  /* Risk Tags */
+  .mt-risk-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 0 2px;
+  }
+  .mt-risk-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 10px;
+    border-radius: 8px;
+    font-size: 10px;
+    font-weight: 600;
+    background: oklch(var(--er) / 0.08);
+    color: oklch(var(--er));
+    letter-spacing: 0.2px;
+  }
+  .mt-risk-tag::before {
+    content: "";
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: oklch(var(--er));
+  }
+
+  @media (max-width: 640px) {
+    .mt-dash { flex-wrap: wrap; gap: 8px; padding: 10px; }
+    .mt-dash-card { min-width: 70px; flex: 1 1 calc(33% - 8px); }
+  }
+
+  /* ── Template Apply Modal extras ── */
+  .mt-modal-spacer { flex: 1; }
+  .mt-btn-manage {
+    color: oklch(var(--bc) / 0.45);
+    border-color: oklch(var(--bc) / 0.08);
+  }
+  .mt-btn-manage:hover { color: oklch(var(--p)); border-color: oklch(var(--p) / 0.3); }
+
+  /* ── Template Manager ── */
+  .mt-modal-wide {
+    max-width: 720px;
+    max-height: 85vh;
+    display: flex;
+    flex-direction: column;
+  }
+  .mt-mgr-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 16px 20px 0;
+  }
+  .mt-mgr-close {
+    width: 28px; height: 28px;
+    display: flex; align-items: center; justify-content: center;
+    border: none; background: none; cursor: pointer;
+    color: oklch(var(--bc) / 0.3); border-radius: 8px;
+    transition: all 0.15s;
+  }
+  .mt-mgr-close:hover { background: oklch(var(--bc) / 0.05); color: oklch(var(--bc) / 0.6); }
+  .mt-mgr-close svg { width: 16px; height: 16px; }
+
+  .mt-mgr-body {
+    display: flex;
+    flex: 1;
+    min-height: 0;
+    padding: 12px;
+    gap: 12px;
+  }
+
+  /* Sidebar */
+  .mt-mgr-sidebar {
+    width: 200px;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    border: 1px solid oklch(var(--bc) / 0.06);
+    border-radius: 12px;
+    overflow: hidden;
+    background: oklch(var(--bc) / 0.01);
+  }
+  .mt-mgr-sidebar-header {
+    padding: 10px 12px 6px;
+  }
+  .mt-mgr-sidebar-label {
+    font-size: 10px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.5px; color: oklch(var(--bc) / 0.35);
+  }
+  .mt-mgr-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 0 4px;
+  }
+  .mt-mgr-item {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    padding: 8px 10px;
+    border: none;
+    background: none;
+    cursor: pointer;
+    text-align: left;
+    border-radius: 8px;
+    transition: background 0.1s;
+    margin-bottom: 2px;
+  }
+  .mt-mgr-item:hover { background: oklch(var(--bc) / 0.04); }
+  .mt-mgr-item-active { background: oklch(var(--p) / 0.08); }
+  .mt-mgr-item-active:hover { background: oklch(var(--p) / 0.12); }
+  .mt-mgr-item-name {
+    font-size: 12px; font-weight: 600;
+    color: oklch(var(--bc) / 0.8);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .mt-mgr-item-active .mt-mgr-item-name { color: oklch(var(--p)); }
+  .mt-mgr-item-desc {
+    font-size: 10px;
+    color: oklch(var(--bc) / 0.35);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .mt-mgr-empty {
+    padding: 20px 12px;
+    text-align: center;
+    font-size: 11px;
+    color: oklch(var(--bc) / 0.25);
+  }
+
+  /* Create new template */
+  .mt-mgr-create {
+    padding: 8px;
+    border-top: 1px solid oklch(var(--bc) / 0.06);
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .mt-mgr-create-input {
+    width: 100%;
+    padding: 5px 8px;
+    border: 1px solid oklch(var(--bc) / 0.08);
+    border-radius: 6px;
+    font-size: 11px;
+    background: oklch(var(--b1));
+    color: oklch(var(--bc));
+    outline: none;
+  }
+  .mt-mgr-create-input:focus { border-color: oklch(var(--p) / 0.4); }
+  .mt-mgr-create-desc { font-size: 10px; }
+
+  /* Detail panel */
+  .mt-mgr-detail {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    border: 1px solid oklch(var(--bc) / 0.06);
+    border-radius: 12px;
+    overflow: hidden;
+  }
+  .mt-mgr-detail-empty {
+    flex: 1;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 8px;
+    color: oklch(var(--bc) / 0.2);
+    font-size: 12px;
+  }
+  .mt-mgr-detail-header {
+    padding: 12px 14px;
+    border-bottom: 1px solid oklch(var(--bc) / 0.06);
+  }
+  .mt-mgr-title-row {
+    display: flex; justify-content: space-between; align-items: flex-start;
+  }
+  .mt-mgr-title {
+    font-size: 15px; font-weight: 700; color: oklch(var(--bc));
+  }
+  .mt-mgr-subtitle {
+    font-size: 11px; color: oklch(var(--bc) / 0.4); margin-top: 1px;
+  }
+  .mt-mgr-title-actions { display: flex; gap: 4px; }
+
+  .mt-btn-sm { padding: 3px 8px; font-size: 11px; }
+  .mt-btn-danger { color: oklch(var(--er)); border-color: oklch(var(--er) / 0.2); }
+  .mt-btn-danger:hover { background: oklch(var(--er) / 0.06); }
+
+  .mt-mgr-edit-name {
+    display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+  }
+  .mt-mgr-name-input {
+    flex: 1; min-width: 120px;
+    padding: 5px 8px; border: 1px solid oklch(var(--p) / 0.3);
+    border-radius: 6px; font-size: 13px; font-weight: 600;
+    background: oklch(var(--b1)); color: oklch(var(--bc));
+    outline: none;
+  }
+  .mt-mgr-desc-input { font-size: 11px; font-weight: 400; }
+
+  .mt-mgr-items-loading { padding: 30px 0; display: flex; justify-content: center; }
+
+  /* Add item row */
+  .mt-mgr-add-item {
+    display: flex; gap: 5px; align-items: center;
+    padding: 8px 12px;
+    border-bottom: 1px solid oklch(var(--bc) / 0.06);
+    background: oklch(var(--bc) / 0.015);
+  }
+  .mt-mgr-add-input {
+    flex: 1; min-width: 0;
+    padding: 5px 8px; border: 1px solid oklch(var(--bc) / 0.08);
+    border-radius: 6px; font-size: 11px;
+    background: oklch(var(--b1)); color: oklch(var(--bc));
+    outline: none;
+  }
+  .mt-mgr-add-input:focus { border-color: oklch(var(--p) / 0.4); }
+  .mt-mgr-add-select {
+    padding: 5px 6px; border: 1px solid oklch(var(--bc) / 0.08);
+    border-radius: 6px; font-size: 10px;
+    background: oklch(var(--b1)); color: oklch(var(--bc));
+    outline: none; width: 80px;
+  }
+  .mt-mgr-add-pri { width: 70px; }
+
+  /* Items list */
+  .mt-mgr-items {
+    flex: 1; overflow-y: auto;
+  }
+  .mt-mgr-item-row {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 14px;
+    border-bottom: 1px solid oklch(var(--bc) / 0.04);
+    transition: background 0.1s;
+  }
+  .mt-mgr-item-row:hover { background: oklch(var(--bc) / 0.015); }
+  .mt-mgr-item-row:last-child { border-bottom: none; }
+  .mt-mgr-item-text {
+    flex: 1; min-width: 0;
+    font-size: 12px; color: oklch(var(--bc) / 0.75);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .mt-mgr-item-actions {
+    display: flex; gap: 2px;
+    opacity: 0;
+    transition: opacity 0.15s;
+  }
+  .mt-mgr-item-row:hover .mt-mgr-item-actions { opacity: 1; }
+  .mt-mgr-action {
+    width: 22px; height: 22px;
+    display: flex; align-items: center; justify-content: center;
+    border: none; background: none; cursor: pointer;
+    color: oklch(var(--bc) / 0.25); border-radius: 4px;
+    transition: all 0.1s;
+  }
+  .mt-mgr-action:hover { background: oklch(var(--bc) / 0.06); color: oklch(var(--bc) / 0.6); }
+  .mt-mgr-action-del:hover { color: oklch(var(--er)); background: oklch(var(--er) / 0.06); }
+  .mt-mgr-action svg { width: 13px; height: 13px; }
+  .mt-mgr-no-items {
+    padding: 30px 14px;
+    text-align: center;
+    font-size: 11px;
+    color: oklch(var(--bc) / 0.25);
+  }
+
+  /* Editing item inline */
+  .mt-mgr-item-editing {
+    background: oklch(var(--p) / 0.03);
+    gap: 5px;
+    flex-wrap: wrap;
+  }
+  .mt-mgr-edit-input {
+    flex: 1; min-width: 140px;
+    padding: 5px 8px; border: 1px solid oklch(var(--p) / 0.3);
+    border-radius: 6px; font-size: 11px;
+    background: oklch(var(--b1)); color: oklch(var(--bc));
+    outline: none;
+  }
+
+  @media (max-width: 640px) {
+    .mt-modal-wide { max-width: 100%; }
+    .mt-mgr-body { flex-direction: column; }
+    .mt-mgr-sidebar { width: 100%; max-height: 150px; }
+  }
+</style>

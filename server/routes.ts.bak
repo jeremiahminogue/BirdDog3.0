@@ -1,0 +1,1155 @@
+import { Hono } from "hono";
+import { db, sqlite } from "./db.js";
+import {
+  employees, classifications, jobs, jobBudgets, jobCosts,
+  jobAssignments, subcontracts, certifications, assets,
+  employeeNotes, users, jurisdictions, jurisdictionRates, settings,
+  companies
+} from "../shared/schema.js";
+import { eq, and, sql, desc } from "drizzle-orm";
+import { requireAuth, requireRole, requireSuperAdmin } from "./auth.js";
+import { getCompanyId } from "./tenant.js";
+import bcrypt from "bcryptjs";
+import { validate, ClassificationSchema, EmployeeSchema, JobSchema, AssignmentSchema, CostSchema, BudgetSchema, AssetSchema, JurisdictionSchema, RateSchema, UserSchema } from "./validation.js";
+import { mkdirSync, writeFileSync, readdirSync, unlinkSync } from "fs";
+import { dirname } from "path";
+
+// ── S-09/S-10 FIX: Shared upload validator (magic bytes + size) ──
+const MAX_UPLOAD = 5 * 1024 * 1024; // 5MB
+const IMAGE_MAGIC: Record<string, number[][]> = {
+  jpg:  [[0xFF, 0xD8, 0xFF]],
+  jpeg: [[0xFF, 0xD8, 0xFF]],
+  png:  [[0x89, 0x50, 0x4E, 0x47]],
+  webp: [[0x52, 0x49, 0x46, 0x46]], // RIFF header (WebP)
+};
+
+function validateUpload(file: File, allowSvg = false): { ok: true; ext: string } | { ok: false; error: string } {
+  if (file.size > MAX_UPLOAD) return { ok: false, error: "File too large — 5MB max" };
+  const ext = file.name?.split(".").pop()?.toLowerCase() || "";
+  const allowed = allowSvg ? ["jpg", "jpeg", "png", "webp", "svg"] : ["jpg", "jpeg", "png", "webp"];
+  if (!allowed.includes(ext)) return { ok: false, error: `Only ${allowed.join(", ")} allowed` };
+  return { ok: true, ext };
+}
+
+async function validateImageBytes(buffer: ArrayBuffer, ext: string): Promise<boolean> {
+  if (ext === "svg") return true; // SVG is text-based, no magic bytes
+  const bytes = new Uint8Array(buffer).slice(0, 8);
+  const signatures = IMAGE_MAGIC[ext];
+  if (!signatures) return false;
+  return signatures.some(sig => sig.every((b, i) => bytes[i] === b));
+}
+
+const api = new Hono();
+
+// ── Public Settings (no auth — needed on login page) ────────────
+// Only expose safe display keys (company name, logo, theme) — never internal config
+const PUBLIC_SETTINGS_KEYS = new Set(["companyName", "companyLogo", "theme", "accentColor"]);
+api.get("/settings", async (c) => {
+  const cid = parseInt(c.req.query("companyId") || "1");
+  if (isNaN(cid) || cid < 1) return c.json({});
+  const rows = await db.select().from(settings).where(eq(settings.companyId, cid));
+  const obj: Record<string, string> = {};
+  for (const r of rows) {
+    if (PUBLIC_SETTINGS_KEYS.has(r.key)) obj[r.key] = r.value;
+  }
+  return c.json(obj);
+});
+
+// All remaining API routes require auth
+api.use("/*", requireAuth);
+
+// ── Classifications ─────────────────────────────────────────────
+api.get("/classifications", async (c) => {
+  const companyId = getCompanyId(c);
+  const rows = await db.select().from(classifications).where(eq(classifications.companyId, companyId)).orderBy(classifications.name);
+  return c.json(rows);
+});
+
+api.post("/classifications", requireRole("admin", "pm"), validate(ClassificationSchema), async (c) => {
+  const companyId = getCompanyId(c);
+  const data = c.get("validatedBody") || await c.req.json();
+  const [row] = await db.insert(classifications).values({ ...data, companyId }).returning();
+  return c.json(row, 201);
+});
+
+api.put("/classifications/:id", requireRole("admin", "pm"), validate(ClassificationSchema), async (c) => {
+  const companyId = getCompanyId(c);
+  const id = parseInt(c.req.param("id"));
+  const data = c.get("validatedBody") || await c.req.json();
+  const [row] = await db.update(classifications).set(data).where(and(eq(classifications.id, id), eq(classifications.companyId, companyId))).returning();
+  return c.json(row);
+});
+
+// ── Employees ───────────────────────────────────────────────────
+api.get("/employees", async (c) => {
+  const companyId = getCompanyId(c);
+  const status = c.req.query("status");
+  const rows = await db
+    .select({
+      id: employees.id,
+      employeeNumber: employees.employeeNumber,
+      firstName: employees.firstName,
+      lastName: employees.lastName,
+      classificationId: employees.classificationId,
+      status: employees.status,
+      phone: employees.phone,
+      pePhone: employees.pePhone,
+      personalEmail: employees.personalEmail,
+      workEmail: employees.workEmail,
+      address: employees.address,
+      emergencyContactName: employees.emergencyContactName,
+      emergencyContactPhone: employees.emergencyContactPhone,
+      dateOfHire: employees.dateOfHire,
+      dateOfBirth: employees.dateOfBirth,
+      placeOfBirth: employees.placeOfBirth,
+      shirtSize: employees.shirtSize,
+      jacketSize: employees.jacketSize,
+      elecLicense: employees.elecLicense,
+      dlNumber: employees.dlNumber,
+      dlState: employees.dlState,
+      dlExpiration: employees.dlExpiration,
+      backgroundCheck: employees.backgroundCheck,
+      backgroundCheckDate: employees.backgroundCheckDate,
+      reasonForLeaving: employees.reasonForLeaving,
+      photoUrl: employees.photoUrl,
+      notes: employees.notes,
+      createdAt: employees.createdAt,
+      updatedAt: employees.updatedAt,
+      classificationName: classifications.name,
+      classificationColor: classifications.color,
+      department: classifications.department,
+    })
+    .from(employees)
+    .leftJoin(classifications, eq(employees.classificationId, classifications.id))
+    .where(status ? and(eq(employees.companyId, companyId), eq(employees.status, status as "active" | "inactive")) : eq(employees.companyId, companyId))
+    .orderBy(employees.lastName, employees.firstName);
+
+  return c.json(rows);
+});
+
+api.get("/employees/:id", async (c) => {
+  const companyId = getCompanyId(c);
+  const id = parseInt(c.req.param("id"));
+  const [row] = await db
+    .select()
+    .from(employees)
+    .leftJoin(classifications, eq(employees.classificationId, classifications.id))
+    .where(and(eq(employees.id, id), eq(employees.companyId, companyId)))
+    .limit(1);
+  if (!row) return c.json({ error: "Not found" }, 404);
+  return c.json({ ...row.employees, classification: row.classifications });
+});
+
+api.post("/employees", requireRole("admin", "pm"), validate(EmployeeSchema), async (c) => {
+  const companyId = getCompanyId(c);
+  const data = c.get("validatedBody") || await c.req.json();
+  const [row] = await db.insert(employees).values({ ...data, companyId }).returning();
+  return c.json(row, 201);
+});
+
+api.put("/employees/:id", requireRole("admin", "pm"), validate(EmployeeSchema), async (c) => {
+  const companyId = getCompanyId(c);
+  const id = parseInt(c.req.param("id"));
+  const data = c.get("validatedBody") || await c.req.json();
+  data.updatedAt = new Date().toISOString();
+  const [row] = await db.update(employees).set(data).where(and(eq(employees.id, id), eq(employees.companyId, companyId))).returning();
+  return c.json(row);
+});
+
+// Upload employee photo
+api.post("/employees/:id/photo", requireRole("admin", "pm"), async (c) => {
+  const companyId = getCompanyId(c);
+  const id = parseInt(c.req.param("id"));
+  const body = await c.req.parseBody();
+  const file = body["photo"];
+
+  if (!file || typeof file === "string") {
+    return c.json({ error: "No photo file provided" }, 400);
+  }
+
+  // S-09/S-10: Validate size, extension, AND magic bytes
+  const check = validateUpload(file as File);
+  if (!check.ok) return c.json({ error: check.error }, 400);
+  const ext = check.ext;
+
+  const buffer = await (file as File).arrayBuffer();
+  if (!await validateImageBytes(buffer, ext)) {
+    return c.json({ error: "File content doesn't match its extension" }, 400);
+  }
+
+  const dataDir = process.env.DB_PATH ? dirname(process.env.DB_PATH) : "./data";
+  const photosDir = `${dataDir}/photos`;
+  mkdirSync(photosDir, { recursive: true });
+
+  // Remove old photos for this employee
+  try {
+    const existing = readdirSync(photosDir).filter(f => f.startsWith(`emp-${id}-`) || f === `emp-${id}.${ext}`);
+    for (const old of existing) unlinkSync(`${photosDir}/${old}`);
+  } catch {}
+
+  const ts = Date.now();
+  const filename = `emp-${id}-${ts}.${ext}`;
+  const filepath = `${photosDir}/${filename}`;
+  writeFileSync(filepath, Buffer.from(buffer));
+
+  const photoUrl = `/api/photos/${filename}`;
+  await db.update(employees).set({ photoUrl, updatedAt: new Date().toISOString() }).where(and(eq(employees.id, id), eq(employees.companyId, companyId)));
+
+  return c.json({ photoUrl });
+});
+
+// Toggle employee active/inactive
+api.put("/employees/:id/status", requireRole("admin"), async (c) => {
+  const companyId = getCompanyId(c);
+  const id = parseInt(c.req.param("id"));
+  const { status, reasonForLeaving } = await c.req.json() as {
+    status: "active" | "inactive";
+    reasonForLeaving?: string;
+  };
+
+  if (!["active", "inactive"].includes(status)) {
+    return c.json({ error: "Status must be 'active' or 'inactive'" }, 400);
+  }
+
+  const updates: any = { status, updatedAt: new Date().toISOString() };
+
+  if (status === "inactive" && reasonForLeaving !== undefined) {
+    updates.reasonForLeaving = reasonForLeaving || null;
+  }
+
+  // If reactivating, clear reason for leaving
+  if (status === "active") {
+    updates.reasonForLeaving = null;
+  }
+
+  const [row] = await db.update(employees).set(updates)
+    .where(and(eq(employees.id, id), eq(employees.companyId, companyId)))
+    .returning();
+
+  // If deactivating, also deactivate their job assignments
+  if (status === "inactive") {
+    await db.update(jobAssignments)
+      .set({ isActive: false })
+      .where(and(eq(jobAssignments.employeeId, id), eq(jobAssignments.isActive, true)));
+  }
+
+  return c.json(row);
+});
+
+// Delete employee — only allowed if no history (assignments, logs, etc.)
+api.delete("/employees/:id", requireRole("admin"), async (c) => {
+  const companyId = getCompanyId(c);
+  const id = parseInt(c.req.param("id"));
+
+  // Check for any related records (B-05: check ALL FK references)
+  const assignments = sqlite.query(
+    "SELECT COUNT(*) as c FROM job_assignments WHERE employee_id = ?"
+  ).get(id) as any;
+  const logs = sqlite.query(
+    "SELECT COUNT(*) as c FROM daily_log WHERE employee_id = ?"
+  ).get(id) as any;
+  const notes = sqlite.query(
+    "SELECT COUNT(*) as c FROM employee_notes WHERE employee_id = ?"
+  ).get(id) as any;
+  const opps = sqlite.query(
+    "SELECT COUNT(*) as c FROM opportunities WHERE estimator_id = ?"
+  ).get(id) as any;
+  const actionItems = sqlite.query(
+    "SELECT COUNT(*) as c FROM action_items WHERE assigned_to_id = ?"
+  ).get(id) as any;
+  const certs = sqlite.query(
+    "SELECT COUNT(*) as c FROM certifications WHERE employee_id = ?"
+  ).get(id) as any;
+  const assetRefs = sqlite.query(
+    "SELECT COUNT(*) as c FROM assets WHERE assigned_to_employee = ?"
+  ).get(id) as any;
+  const pendingMoves = sqlite.query(
+    "SELECT COUNT(*) as c FROM scheduled_moves WHERE employee_id = ?"
+  ).get(id) as any;
+
+  const total = (assignments?.c || 0) + (logs?.c || 0) + (notes?.c || 0) + (opps?.c || 0)
+    + (actionItems?.c || 0) + (certs?.c || 0) + (assetRefs?.c || 0) + (pendingMoves?.c || 0);
+  if (total > 0) {
+    return c.json({
+      error: "Cannot delete — this employee has history. Deactivate them instead.",
+      details: {
+        assignments: assignments?.c || 0,
+        dailyLogs: logs?.c || 0,
+        notes: notes?.c || 0,
+        opportunities: opps?.c || 0,
+        actionItems: actionItems?.c || 0,
+        certifications: certs?.c || 0,
+        assignedAssets: assetRefs?.c || 0,
+        scheduledMoves: pendingMoves?.c || 0,
+      }
+    }, 400);
+  }
+
+  await db.delete(employees).where(and(eq(employees.id, id), eq(employees.companyId, companyId)));
+  return c.json({ ok: true });
+});
+
+// ── Jobs ────────────────────────────────────────────────────────
+api.get("/jobs", async (c) => {
+  const companyId = getCompanyId(c);
+  const status = c.req.query("status");
+  const condition = status ? and(eq(jobs.companyId, companyId), eq(jobs.status, status as any)) : eq(jobs.companyId, companyId);
+  const rows = await db.select().from(jobs).where(condition).orderBy(jobs.jobNumber);
+  return c.json(rows);
+});
+
+api.get("/jobs/:id", async (c) => {
+  const companyId = getCompanyId(c);
+  const id = parseInt(c.req.param("id"));
+  const [job] = await db.select().from(jobs).where(and(eq(jobs.id, id), eq(jobs.companyId, companyId))).limit(1);
+  if (!job) return c.json({ error: "Not found" }, 404);
+
+  const budgets = await db.select().from(jobBudgets).where(eq(jobBudgets.jobId, id));
+  const costs = await db.select().from(jobCosts).where(eq(jobCosts.jobId, id)).orderBy(desc(jobCosts.dateRecorded));
+  const subs = await db.select().from(subcontracts).where(eq(subcontracts.jobId, id));
+
+  return c.json({ ...job, budgets, costs, subcontracts: subs });
+});
+
+api.post("/jobs", requireRole("admin", "pm"), validate(JobSchema), async (c) => {
+  const companyId = getCompanyId(c);
+  const data = c.get("validatedBody") || await c.req.json();
+  const [row] = await db.insert(jobs).values({ ...data, companyId }).returning();
+
+  // Auto-create budget categories
+  const categories = ["labor", "material", "equipment", "general", "subcontract"] as const;
+  for (const cat of categories) {
+    await db.insert(jobBudgets).values({ jobId: row.id, category: cat });
+  }
+
+  return c.json(row, 201);
+});
+
+api.put("/jobs/:id", requireRole("admin", "pm"), validate(JobSchema), async (c) => {
+  const companyId = getCompanyId(c);
+  const id = parseInt(c.req.param("id"));
+  const data = c.get("validatedBody") || await c.req.json();
+  data.updatedAt = new Date().toISOString();
+  // Ensure jurisdictionId is stored as integer or null (not string "null")
+  if (data.jurisdictionId !== undefined) {
+    data.jurisdictionId = data.jurisdictionId ? parseInt(data.jurisdictionId) : null;
+  }
+  const [row] = await db.update(jobs).set(data).where(and(eq(jobs.id, id), eq(jobs.companyId, companyId))).returning();
+  return c.json(row);
+});
+
+// Toggle showOnBoard for a job
+api.patch("/jobs/:id/show-on-board", requireRole("admin", "pm"), async (c) => {
+  const companyId = getCompanyId(c);
+  const id = parseInt(c.req.param("id"));
+  const { showOnBoard } = await c.req.json();
+  const [row] = await db.update(jobs).set({ showOnBoard: !!showOnBoard, updatedAt: new Date().toISOString() }).where(and(eq(jobs.id, id), eq(jobs.companyId, companyId))).returning();
+  return c.json(row);
+});
+
+// Pre-check: count related data before delete
+api.get("/jobs/:id/delete-check", requireRole("admin"), async (c) => {
+  const companyId = getCompanyId(c);
+  const id = parseInt(c.req.param("id"));
+  const assignments = sqlite.query("SELECT COUNT(*) as c FROM job_assignments WHERE job_id = ?").get(id) as any;
+  const costs = sqlite.query("SELECT COUNT(*) as c FROM job_costs WHERE job_id = ?").get(id) as any;
+  const budgets = sqlite.query("SELECT COUNT(*) as c FROM job_budgets WHERE job_id = ?").get(id) as any;
+  const actionItems = sqlite.query("SELECT COUNT(*) as c FROM action_items WHERE job_id = ?").get(id) as any;
+  const subcontracts = sqlite.query("SELECT COUNT(*) as c FROM subcontracts WHERE job_id = ?").get(id) as any;
+  return c.json({
+    assignments: assignments?.c || 0,
+    costs: costs?.c || 0,
+    budgets: budgets?.c || 0,
+    actionItems: actionItems?.c || 0,
+    subcontracts: subcontracts?.c || 0,
+  });
+});
+
+api.delete("/jobs/:id", requireRole("admin"), async (c) => {
+  const companyId = getCompanyId(c);
+  const id = parseInt(c.req.param("id"));
+  await db.delete(jobs).where(and(eq(jobs.id, id), eq(jobs.companyId, companyId)));
+  return c.json({ ok: true });
+});
+
+// ── Job Budgets ─────────────────────────────────────────────────
+api.put("/jobs/:jobId/budgets/:id", requireRole("admin", "pm"), validate(BudgetSchema), async (c) => {
+  const companyId = getCompanyId(c);
+  const jobId = parseInt(c.req.param("jobId"));
+  const id = parseInt(c.req.param("id"));
+  // Verify job belongs to this company
+  const [job] = await db.select({ id: jobs.id }).from(jobs)
+    .where(and(eq(jobs.id, jobId), eq(jobs.companyId, companyId))).limit(1);
+  if (!job) return c.json({ error: "Job not found" }, 404);
+  const data = c.get("validatedBody") || await c.req.json();
+  const [row] = await db.update(jobBudgets).set(data).where(and(eq(jobBudgets.id, id), eq(jobBudgets.jobId, jobId))).returning();
+  return c.json(row);
+});
+
+// ── Job Costs ───────────────────────────────────────────────────
+api.post("/jobs/:jobId/costs", requireRole("admin", "pm"), validate(CostSchema), async (c) => {
+  const companyId = getCompanyId(c);
+  const jobId = parseInt(c.req.param("jobId"));
+  // Verify job belongs to this company before allowing cost insert
+  const [job] = await db.select({ id: jobs.id }).from(jobs)
+    .where(and(eq(jobs.id, jobId), eq(jobs.companyId, companyId))).limit(1);
+  if (!job) return c.json({ error: "Job not found" }, 404);
+  const data = c.get("validatedBody") || await c.req.json();
+  const [row] = await db.insert(jobCosts).values({ ...data, jobId }).returning();
+  return c.json(row, 201);
+});
+
+// ── Job Assignments (the drag-and-drop core) ────────────────────
+api.get("/assignments", async (c) => {
+  const jobId = c.req.query("jobId");
+  const activeOnly = c.req.query("active") !== "false";
+
+  let condition = activeOnly ? eq(jobAssignments.isActive, true) : undefined;
+  if (jobId) {
+    const jid = parseInt(jobId);
+    condition = activeOnly
+      ? and(eq(jobAssignments.jobId, jid), eq(jobAssignments.isActive, true))
+      : eq(jobAssignments.jobId, jid);
+  }
+
+  const rows = await db
+    .select({
+      id: jobAssignments.id,
+      jobId: jobAssignments.jobId,
+      employeeId: jobAssignments.employeeId,
+      role: jobAssignments.role,
+      billRate: jobAssignments.billRate,
+      isActive: jobAssignments.isActive,
+      assignedAt: jobAssignments.assignedAt,
+      employeeFirstName: employees.firstName,
+      employeeLastName: employees.lastName,
+      employeeNumber: employees.employeeNumber,
+      classificationName: classifications.name,
+      classificationColor: classifications.color,
+      department: classifications.department,
+    })
+    .from(jobAssignments)
+    .leftJoin(employees, eq(jobAssignments.employeeId, employees.id))
+    .leftJoin(classifications, eq(employees.classificationId, classifications.id))
+    .where(condition);
+
+  return c.json(rows);
+});
+
+// Assign employee to job (drag to job)
+api.post("/assignments", requireRole("admin", "pm"), validate(AssignmentSchema), async (c) => {
+  const { jobId, employeeId, role, billRate } = c.get("validatedBody") || await c.req.json();
+
+  // Deactivate any current active assignments for this employee first
+  await db.update(jobAssignments)
+    .set({ isActive: false })
+    .where(and(eq(jobAssignments.employeeId, employeeId), eq(jobAssignments.isActive, true)));
+
+  // Check if assignment to this job already exists (reactivate it)
+  const [existing] = await db
+    .select()
+    .from(jobAssignments)
+    .where(and(eq(jobAssignments.jobId, jobId), eq(jobAssignments.employeeId, employeeId)))
+    .limit(1);
+
+  if (existing) {
+    const [row] = await db
+      .update(jobAssignments)
+      .set({ isActive: true, role, billRate, assignedAt: new Date().toISOString() })
+      .where(eq(jobAssignments.id, existing.id))
+      .returning();
+    return c.json(row);
+  }
+
+  const [row] = await db
+    .insert(jobAssignments)
+    .values({ jobId, employeeId, role, billRate })
+    .returning();
+  return c.json(row, 201);
+});
+
+// Unassign employee (drag back to bench)
+api.delete("/assignments/:id", requireRole("admin", "pm"), async (c) => {
+  const id = parseInt(c.req.param("id"));
+  await db.update(jobAssignments).set({ isActive: false }).where(eq(jobAssignments.id, id));
+  return c.json({ ok: true });
+});
+
+// Move employee between jobs
+api.post("/assignments/move", requireRole("admin", "pm"), async (c) => {
+  const { employeeId, fromJobId, toJobId } = await c.req.json();
+
+  // Validate employee is actually active on fromJob
+  const [current] = await db.select({ id: jobAssignments.id })
+    .from(jobAssignments)
+    .where(and(
+      eq(jobAssignments.employeeId, employeeId),
+      eq(jobAssignments.jobId, fromJobId),
+      eq(jobAssignments.isActive, true)
+    ))
+    .limit(1);
+
+  if (!current) {
+    return c.json({ error: "Employee is not currently assigned to that job" }, 400);
+  }
+
+  // Deactivate old assignment
+  await db
+    .update(jobAssignments)
+    .set({ isActive: false })
+    .where(eq(jobAssignments.id, current.id));
+
+  // Create or reactivate new assignment
+  const [existing] = await db
+    .select()
+    .from(jobAssignments)
+    .where(and(eq(jobAssignments.jobId, toJobId), eq(jobAssignments.employeeId, employeeId)))
+    .limit(1);
+
+  if (existing) {
+    const [row] = await db
+      .update(jobAssignments)
+      .set({ isActive: true, assignedAt: new Date().toISOString() })
+      .where(eq(jobAssignments.id, existing.id))
+      .returning();
+    return c.json(row);
+  }
+
+  const [row] = await db
+    .insert(jobAssignments)
+    .values({ jobId: toJobId, employeeId })
+    .returning();
+  return c.json(row, 201);
+});
+
+// ── Workforce Board aggregate (single call for the board) ───────
+api.get("/workforce-board", async (c) => {
+  const companyId = getCompanyId(c);
+  // Get all active employees with classifications + photo
+  const allEmployees = await db
+    .select({
+      id: employees.id,
+      employeeNumber: employees.employeeNumber,
+      firstName: employees.firstName,
+      lastName: employees.lastName,
+      classificationId: employees.classificationId,
+      classificationName: classifications.name,
+      classificationColor: classifications.color,
+      department: classifications.department,
+      hasLicense: classifications.hasLicense,
+      status: employees.status,
+      photoUrl: employees.photoUrl,
+    })
+    .from(employees)
+    .leftJoin(classifications, eq(employees.classificationId, classifications.id))
+    .where(and(eq(employees.companyId, companyId), eq(employees.status, "active")))
+    .orderBy(classifications.name, employees.lastName);
+
+  // Get all active assignments
+  const activeAssignments = await db
+    .select()
+    .from(jobAssignments)
+    .where(eq(jobAssignments.isActive, true));
+
+  // Get active/planning jobs with budgets and jurisdictions (only showOnBoard)
+  const activeJobs = await db
+    .select({
+      id: jobs.id,
+      jobNumber: jobs.jobNumber,
+      name: jobs.name,
+      address: jobs.address,
+      jurisdictionId: jobs.jurisdictionId,
+      gcContact: jobs.gcContact,
+      status: jobs.status,
+      startDate: jobs.startDate,
+      endDate: jobs.endDate,
+      scopeOfWork: jobs.scopeOfWork,
+      originalContract: jobs.originalContract,
+      currentContract: jobs.currentContract,
+      showOnBoard: jobs.showOnBoard,
+      createdAt: jobs.createdAt,
+      updatedAt: jobs.updatedAt,
+      jurisdictionName: jurisdictions.name,
+    })
+    .from(jobs)
+    .leftJoin(jurisdictions, eq(jobs.jurisdictionId, jurisdictions.id))
+    .where(and(eq(jobs.companyId, companyId), sql`${jobs.status} IN ('planning', 'active') AND ${jobs.showOnBoard} = 1`))
+    .orderBy(jobs.jobNumber);
+
+  const budgets = await db.select().from(jobBudgets);
+
+  // Get latest finance data from BOTH detail and summary records
+  // Detail has: hour_budget, hours_used, labor/material/general budget+cost
+  // Summary has: per-category curr_budget + cost_to_date (including equipment)
+  // We pull detail for hours + material, and summary for equipment + general (more granular)
+  const detailFinance = sqlite.query(`
+    SELECT job_id, hour_budget, hours_used,
+           material_budget, material_cost,
+           general_budget, general_cost
+    FROM project_finance_data
+    WHERE (report_type = 'detail' OR report_type IS NULL)
+      AND id IN (
+        SELECT MAX(id) FROM project_finance_data
+        WHERE report_type = 'detail' OR report_type IS NULL
+        GROUP BY job_id
+      )
+  `).all() as any[];
+  const summaryFinance = sqlite.query(`
+    SELECT job_id,
+           equipment_curr_budget, equipment_cost_to_date,
+           general_curr_budget, general_cost_to_date
+    FROM project_finance_data
+    WHERE report_type = 'summary'
+      AND id IN (
+        SELECT MAX(id) FROM project_finance_data
+        WHERE report_type = 'summary'
+        GROUP BY job_id
+      )
+  `).all() as any[];
+  const summaryMap = new Map<number, any>();
+  for (const s of summaryFinance) {
+    summaryMap.set(s.job_id, s);
+  }
+  const financeMap = new Map<number, any>();
+  for (const f of detailFinance) {
+    const s = summaryMap.get(f.job_id);
+    financeMap.set(f.job_id, {
+      hourBudget: f.hour_budget || 0,
+      hoursUsed: f.hours_used || 0,
+      materialBudget: f.material_budget || 0,
+      materialCost: f.material_cost || 0,
+      equipmentBudget: s?.equipment_curr_budget || 0,
+      equipmentCost: s?.equipment_cost_to_date || 0,
+      generalBudget: s?.general_curr_budget || f.general_budget || 0,
+      generalCost: s?.general_cost_to_date || f.general_cost || 0,
+    });
+  }
+
+  // Get all jurisdiction rates for quick lookup — build a map keyed by "jurId:classId"
+  const allJurisdictionRates = await db.select().from(jurisdictionRates).where(eq(jurisdictionRates.companyId, companyId));
+  const rateMap = new Map<string, { hourlyRate: number; totalCostRate: number }>();
+  for (const r of allJurisdictionRates) {
+    rateMap.set(`${Number(r.jurisdictionId)}:${Number(r.classificationId)}`, {
+      hourlyRate: r.hourlyRate,
+      totalCostRate: r.totalCostRate,
+    });
+  }
+
+  // Build the board data
+  const assignedEmployeeIds = new Set(activeAssignments.map((a) => a.employeeId));
+  const bench = allEmployees.filter((e) => !assignedEmployeeIds.has(e.id));
+
+  const jobCards = activeJobs.map((job) => {
+    const jobAssigns = activeAssignments.filter((a) => a.jobId === job.id);
+    const crew = jobAssigns.map((a) => {
+      const emp = allEmployees.find((e) => e.id === a.employeeId);
+      if (!emp) return null;
+
+      // Look up jurisdiction-specific rate: job jurisdiction + employee classification
+      let effectiveRate = 0;
+      let effectiveHourly = 0;
+      if (job.jurisdictionId && emp.classificationId) {
+        const key = `${Number(job.jurisdictionId)}:${Number(emp.classificationId)}`;
+        const jRate = rateMap.get(key);
+        if (jRate) {
+          effectiveHourly = jRate.hourlyRate;
+          effectiveRate = jRate.totalCostRate;
+        }
+      }
+
+      return {
+        ...emp,
+        assignmentId: a.id,
+        role: a.role,
+        billRate: a.billRate,
+        effectiveHourlyRate: effectiveHourly,
+        effectiveCostRate: effectiveRate,
+      };
+    }).filter(Boolean);
+
+    const jobBudgetData = budgets.filter((b) => b.jobId === job.id);
+    const totalBudget = jobBudgetData.reduce((s, b) => s + (b.currentBudget || 0), 0);
+    const dailyLaborCost = crew.reduce((s, e: any) => s + (e.effectiveCostRate || 0) * 8, 0);
+    const weeklyLaborCost = crew.reduce((s, e: any) => s + (e.effectiveCostRate || 0) * 40, 0);
+    const compositeHourlyRate = crew.length > 0
+      ? crew.reduce((s, e: any) => s + (e.effectiveHourlyRate || 0), 0) / crew.length
+      : 0;
+
+    // Licensed to non-licensed ratio
+    const licensedCount = crew.filter((e: any) => e.hasLicense).length;
+    const nonLicensedCount = crew.length - licensedCount;
+    let licenseRatio = { licensed: 0, perNonLicensed: 0 };
+    if (crew.length > 0) {
+      if (licensedCount === 0) {
+        licenseRatio = { licensed: 0, perNonLicensed: nonLicensedCount };
+      } else {
+        // Express as 1/X where X = non-licensed per licensed (up to 2 decimals)
+        const ratio = nonLicensedCount / licensedCount;
+        const rounded = Math.round(ratio * 100) / 100;
+        licenseRatio = { licensed: 1, perNonLicensed: rounded };
+      }
+    }
+
+    // Manhours remaining + burndown
+    const finance = financeMap.get(job.id);
+    const hoursRemaining = finance ? Math.max(0, finance.hourBudget - finance.hoursUsed) : null;
+    const hourBudget = finance?.hourBudget || null;
+    const hoursUsed = finance?.hoursUsed || null;
+    const materialBudget = finance?.materialBudget || null;
+    const materialCost = finance?.materialCost || null;
+    const equipmentBudget = finance?.equipmentBudget || null;
+    const equipmentCost = finance?.equipmentCost || null;
+    const generalBudget = finance?.generalBudget || null;
+    const generalCost = finance?.generalCost || null;
+
+    // Weeks remaining: hoursRemaining / (crewCount * 40)
+    const crewHoursPerWeek = crew.length * 40;
+    const weeksRemaining = (hoursRemaining !== null && crewHoursPerWeek > 0)
+      ? hoursRemaining / crewHoursPerWeek
+      : null;
+
+    // Estimated runout date
+    let hoursRunOutDate: string | null = null;
+    if (weeksRemaining !== null) {
+      const now = new Date();
+      now.setDate(now.getDate() + Math.round(weeksRemaining * 7));
+      hoursRunOutDate = now.toISOString().split("T")[0]; // YYYY-MM-DD
+    }
+
+    return {
+      ...job,
+      crew,
+      crewCount: crew.length,
+      budgets: jobBudgetData,
+      totalBudget,
+      dailyLaborCost,
+      weeklyLaborCost,
+      compositeHourlyRate,
+      licenseRatio,
+      hoursRemaining,
+      hourBudget,
+      hoursUsed,
+      materialBudget,
+      materialCost,
+      equipmentBudget,
+      equipmentCost,
+      generalBudget,
+      generalCost,
+      weeksRemaining,
+      hoursRunOutDate,
+    };
+  });
+
+  return c.json({ bench, jobs: jobCards });
+});
+
+// ── Jurisdictions ───────────────────────────────────────────────
+api.get("/jurisdictions", async (c) => {
+  const companyId = getCompanyId(c);
+  const rows = await db.select().from(jurisdictions).where(eq(jurisdictions.companyId, companyId)).orderBy(jurisdictions.name);
+  return c.json(rows);
+});
+
+api.post("/jurisdictions", requireRole("admin", "pm"), validate(JurisdictionSchema), async (c) => {
+  const companyId = getCompanyId(c);
+  const data = c.get("validatedBody") || await c.req.json();
+  const [row] = await db.insert(jurisdictions).values({ ...data, companyId }).returning();
+  return c.json(row, 201);
+});
+
+api.put("/jurisdictions/:id", requireRole("admin", "pm"), async (c) => {
+  const companyId = getCompanyId(c);
+  const id = parseInt(c.req.param("id"));
+  const data = await c.req.json();
+  const [row] = await db.update(jurisdictions).set(data).where(and(eq(jurisdictions.id, id), eq(jurisdictions.companyId, companyId))).returning();
+  return c.json(row);
+});
+
+api.delete("/jurisdictions/:id", requireRole("admin"), async (c) => {
+  const companyId = getCompanyId(c);
+  const id = parseInt(c.req.param("id"));
+  // Delete associated rates first, then the jurisdiction
+  await db.delete(jurisdictionRates).where(and(eq(jurisdictionRates.jurisdictionId, id), eq(jurisdictionRates.companyId, companyId)));
+  await db.delete(jurisdictions).where(and(eq(jurisdictions.id, id), eq(jurisdictions.companyId, companyId)));
+  return c.json({ ok: true });
+});
+
+// ── Jurisdiction Rates ─────────────────────────────────────────
+api.get("/jurisdictions/:id/rates", async (c) => {
+  const companyId = getCompanyId(c);
+  const id = parseInt(c.req.param("id"));
+  const rows = await db
+    .select({
+      id: jurisdictionRates.id,
+      jurisdictionId: jurisdictionRates.jurisdictionId,
+      classificationId: jurisdictionRates.classificationId,
+      hourlyRate: jurisdictionRates.hourlyRate,
+      totalCostRate: jurisdictionRates.totalCostRate,
+      effectiveDate: jurisdictionRates.effectiveDate,
+      expirationDate: jurisdictionRates.expirationDate,
+      classificationName: classifications.name,
+      department: classifications.department,
+      classificationColor: classifications.color,
+    })
+    .from(jurisdictionRates)
+    .leftJoin(classifications, eq(jurisdictionRates.classificationId, classifications.id))
+    .where(and(eq(jurisdictionRates.jurisdictionId, id), eq(jurisdictionRates.companyId, companyId)))
+    .orderBy(classifications.department, classifications.name);
+  return c.json(rows);
+});
+
+api.post("/jurisdictions/:id/rates", requireRole("admin", "pm"), validate(RateSchema), async (c) => {
+  const companyId = getCompanyId(c);
+  const jurisdictionId = parseInt(c.req.param("id"));
+  const data = c.get("validatedBody") || await c.req.json();
+  const [row] = await db.insert(jurisdictionRates).values({ ...data, jurisdictionId, companyId }).returning();
+  return c.json(row, 201);
+});
+
+api.put("/jurisdiction-rates/:id", requireRole("admin", "pm"), async (c) => {
+  const companyId = getCompanyId(c);
+  const id = parseInt(c.req.param("id"));
+  const data = await c.req.json();
+  const [row] = await db.update(jurisdictionRates).set(data).where(and(eq(jurisdictionRates.id, id), eq(jurisdictionRates.companyId, companyId))).returning();
+  return c.json(row);
+});
+
+api.delete("/jurisdiction-rates/:id", requireRole("admin", "pm"), async (c) => {
+  const companyId = getCompanyId(c);
+  const id = parseInt(c.req.param("id"));
+  await db.delete(jurisdictionRates).where(and(eq(jurisdictionRates.id, id), eq(jurisdictionRates.companyId, companyId)));
+  return c.json({ ok: true });
+});
+
+// Bulk set rates for a jurisdiction (set all classifications at once)
+api.post("/jurisdictions/:id/rates/bulk", requireRole("admin", "pm"), async (c) => {
+  const companyId = getCompanyId(c);
+  const jurisdictionId = parseInt(c.req.param("id"));
+  const { rates } = await c.req.json(); // [{ classificationId, hourlyRate, totalCostRate }]
+  const results = [];
+  for (const r of rates) {
+    // Upsert: delete existing then insert
+    await db.delete(jurisdictionRates).where(
+      and(eq(jurisdictionRates.jurisdictionId, jurisdictionId), eq(jurisdictionRates.classificationId, r.classificationId), eq(jurisdictionRates.companyId, companyId))
+    );
+    const [row] = await db.insert(jurisdictionRates).values({
+      jurisdictionId,
+      classificationId: r.classificationId,
+      hourlyRate: r.hourlyRate,
+      totalCostRate: r.totalCostRate,
+      effectiveDate: r.effectiveDate || null,
+      companyId,
+    }).returning();
+    results.push(row);
+  }
+  return c.json(results);
+});
+
+// Lookup rate for a specific jurisdiction + classification
+api.get("/jurisdiction-rate-lookup", async (c) => {
+  const companyId = getCompanyId(c);
+  const jurisdictionId = parseInt(c.req.query("jurisdictionId") || "0");
+  const classificationId = parseInt(c.req.query("classificationId") || "0");
+  if (!jurisdictionId || !classificationId) return c.json({ error: "Both jurisdictionId and classificationId required" }, 400);
+
+  const [rate] = await db
+    .select()
+    .from(jurisdictionRates)
+    .where(and(eq(jurisdictionRates.jurisdictionId, jurisdictionId), eq(jurisdictionRates.classificationId, classificationId), eq(jurisdictionRates.companyId, companyId)))
+    .limit(1);
+  return c.json(rate || null);
+});
+
+// ── Assets / Tools ───────────────────────────────────────────────
+api.get("/assets", async (c) => {
+  const companyId = getCompanyId(c);
+  const type = c.req.query("type");
+  const status = c.req.query("status");
+  const assignedTo = c.req.query("assignedTo");
+
+  let query = db
+    .select({
+      id: assets.id,
+      type: assets.type,
+      category: assets.category,
+      description: assets.description,
+      manufacturer: assets.manufacturer,
+      model: assets.model,
+      serialNumber: assets.serialNumber,
+      identifier: assets.identifier,
+      assignedToEmployee: assets.assignedToEmployee,
+      assignedToJob: assets.assignedToJob,
+      status: assets.status,
+      condition: assets.condition,
+      purchaseDate: assets.purchaseDate,
+      purchaseCost: assets.purchaseCost,
+      warrantyExpires: assets.warrantyExpires,
+      photoUrl: assets.photoUrl,
+      notes: assets.notes,
+      createdAt: assets.createdAt,
+      updatedAt: assets.updatedAt,
+      employeeFirstName: employees.firstName,
+      employeeLastName: employees.lastName,
+      employeeNumber: employees.employeeNumber,
+      jobName: jobs.name,
+      jobNumber: jobs.jobNumber,
+    })
+    .from(assets)
+    .leftJoin(employees, eq(assets.assignedToEmployee, employees.id))
+    .leftJoin(jobs, eq(assets.assignedToJob, jobs.id));
+
+  const conditions: any[] = [eq(assets.companyId, companyId)];
+  if (type) conditions.push(eq(assets.type, type as any));
+  if (status) conditions.push(eq(assets.status, status as any));
+  if (assignedTo) conditions.push(eq(assets.assignedToEmployee, parseInt(assignedTo)));
+
+  const rows = conditions.length > 0
+    ? await query.where(and(...conditions)).orderBy(assets.description)
+    : await query.orderBy(assets.description);
+
+  return c.json(rows);
+});
+
+api.get("/assets/:id", async (c) => {
+  const companyId = getCompanyId(c);
+  const id = parseInt(c.req.param("id"));
+  const [row] = await db
+    .select()
+    .from(assets)
+    .leftJoin(employees, eq(assets.assignedToEmployee, employees.id))
+    .leftJoin(jobs, eq(assets.assignedToJob, jobs.id))
+    .where(and(eq(assets.id, id), eq(assets.companyId, companyId)))
+    .limit(1);
+  if (!row) return c.json({ error: "Not found" }, 404);
+  return c.json({ ...row.assets, employee: row.employees, job: row.jobs });
+});
+
+api.post("/assets", requireRole("admin", "pm"), validate(AssetSchema), async (c) => {
+  const companyId = getCompanyId(c);
+  const data = c.get("validatedBody") || await c.req.json();
+  if (data.assignedToEmployee) data.assignedToEmployee = parseInt(data.assignedToEmployee) || null;
+  if (data.assignedToJob) data.assignedToJob = parseInt(data.assignedToJob) || null;
+  if (data.purchaseCost) data.purchaseCost = parseFloat(data.purchaseCost) || null;
+  const [row] = await db.insert(assets).values({ ...data, companyId }).returning();
+  return c.json(row, 201);
+});
+
+api.put("/assets/:id", requireRole("admin", "pm"), async (c) => {
+  const companyId = getCompanyId(c);
+  const id = parseInt(c.req.param("id"));
+  const data = await c.req.json();
+  data.updatedAt = new Date().toISOString();
+  if (data.assignedToEmployee !== undefined) data.assignedToEmployee = data.assignedToEmployee ? parseInt(data.assignedToEmployee) : null;
+  if (data.assignedToJob !== undefined) data.assignedToJob = data.assignedToJob ? parseInt(data.assignedToJob) : null;
+  if (data.purchaseCost !== undefined) data.purchaseCost = data.purchaseCost ? parseFloat(data.purchaseCost) : null;
+  const [row] = await db.update(assets).set(data).where(and(eq(assets.id, id), eq(assets.companyId, companyId))).returning();
+  return c.json(row);
+});
+
+api.post("/assets/:id/photo", requireRole("admin", "pm"), async (c) => {
+  const companyId = getCompanyId(c);
+  const id = parseInt(c.req.param("id"));
+  const body = await c.req.parseBody();
+  const file = body["photo"];
+
+  if (!file || typeof file === "string") {
+    return c.json({ error: "No photo file provided" }, 400);
+  }
+
+  // S-09/S-10: Validate size, extension, AND magic bytes
+  const check = validateUpload(file as File);
+  if (!check.ok) return c.json({ error: check.error }, 400);
+  const ext = check.ext;
+
+  const buffer = await (file as File).arrayBuffer();
+  if (!await validateImageBytes(buffer, ext)) {
+    return c.json({ error: "File content doesn't match its extension" }, 400);
+  }
+
+  const dataDir = process.env.DB_PATH ? dirname(process.env.DB_PATH) : "./data";
+  const photosDir = `${dataDir}/photos`;
+  mkdirSync(photosDir, { recursive: true });
+
+  try {
+    const existing = readdirSync(photosDir).filter(f => f.startsWith(`asset-${id}-`));
+    for (const old of existing) unlinkSync(`${photosDir}/${old}`);
+  } catch {}
+
+  const ts = Date.now();
+  const filename = `asset-${id}-${ts}.${ext}`;
+  const filepath = `${photosDir}/${filename}`;
+  writeFileSync(filepath, Buffer.from(buffer));
+
+  const photoUrl = `/api/photos/${filename}`;
+  await db.update(assets).set({ photoUrl, updatedAt: new Date().toISOString() }).where(and(eq(assets.id, id), eq(assets.companyId, companyId)));
+
+  return c.json({ photoUrl });
+});
+
+api.delete("/assets/:id", requireRole("admin"), async (c) => {
+  const companyId = getCompanyId(c);
+  const id = parseInt(c.req.param("id"));
+  const [asset] = await db.select().from(assets).where(and(eq(assets.id, id), eq(assets.companyId, companyId))).limit(1);
+  if (asset?.photoUrl) {
+    const dataDir = process.env.DB_PATH ? dirname(process.env.DB_PATH) : "./data";
+    try {
+      const existing = readdirSync(`${dataDir}/photos`).filter(f => f.startsWith(`asset-${id}-`));
+      for (const old of existing) unlinkSync(`${dataDir}/photos/${old}`);
+    } catch {}
+  }
+  await db.delete(assets).where(and(eq(assets.id, id), eq(assets.companyId, companyId)));
+  return c.json({ ok: true });
+});
+
+// ── User Management (admin only) ────────────────────────────────
+api.get("/users", requireRole("admin"), async (c) => {
+  const currentUser = c.get("user");
+  const companyId = getCompanyId(c);
+  const whereClause = currentUser.role === "super_admin" ? undefined : eq(users.companyId, companyId);
+  const rows = await db
+    .select({
+      id: users.id,
+      username: users.username,
+      displayName: users.displayName,
+      role: users.role,
+      companyId: users.companyId,
+      isActive: users.isActive,
+      createdAt: users.createdAt,
+      lastLogin: users.lastLogin,
+    })
+    .from(users)
+    .where(whereClause)
+    .orderBy(users.displayName);
+  return c.json(rows);
+});
+
+api.post("/users", requireRole("admin"), validate(UserSchema), async (c) => {
+  const currentUser = c.get("user");
+  const { username, password, displayName, role, companyId } = c.get("validatedBody") || await c.req.json();
+  if (!username || !password || !displayName) {
+    return c.json({ error: "All fields required" }, 400);
+  }
+  // Only super_admin can create super_admin users
+  if (role === "super_admin" && currentUser.role !== "super_admin") {
+    return c.json({ error: "Only super admins can create super admin users" }, 403);
+  }
+  const hash = bcrypt.hashSync(password, 10);
+  const assignCompanyId = companyId || currentUser.companyId;
+  const [row] = await db
+    .insert(users)
+    .values({
+      username: username.toLowerCase().trim(),
+      passwordHash: hash,
+      displayName,
+      role: role || "readonly",
+      companyId: assignCompanyId,
+    })
+    .returning();
+  return c.json({ id: row.id, username: row.username, displayName: row.displayName, role: row.role, companyId: row.companyId }, 201);
+});
+
+api.put("/users/:id", requireRole("admin"), async (c) => {
+  const currentUser = c.get("user");
+  const companyId = getCompanyId(c);
+  const id = parseInt(c.req.param("id"));
+  const data = await c.req.json();
+  // Don't allow password change through this endpoint
+  delete data.passwordHash;
+  delete data.password;
+  // Only super_admin can set role to super_admin
+  if (data.role === "super_admin" && currentUser.role !== "super_admin") {
+    return c.json({ error: "Only super admins can assign super admin role" }, 403);
+  }
+  const whereClause = currentUser.role === "super_admin" ? eq(users.id, id) : and(eq(users.id, id), eq(users.companyId, companyId));
+  const [row] = await db.update(users).set(data).where(whereClause).returning();
+  return c.json({ id: row.id, username: row.username, displayName: row.displayName, role: row.role, companyId: row.companyId });
+});
+
+// ── Company Logo Upload ─────────────────────────────────────────
+api.post("/logo", requireSuperAdmin(), async (c) => {
+  const companyId = getCompanyId(c);
+  const body = await c.req.parseBody();
+  const file = body["logo"];
+
+  if (!file || typeof file === "string") {
+    return c.json({ error: "No logo file provided" }, 400);
+  }
+
+  // S-09/S-10: Validate size, extension, AND magic bytes (SVG allowed for logos)
+  const check = validateUpload(file as File, true);
+  if (!check.ok) return c.json({ error: check.error }, 400);
+  const ext = check.ext;
+
+  const buffer = await (file as File).arrayBuffer();
+  if (!await validateImageBytes(buffer, ext)) {
+    return c.json({ error: "File content doesn't match its extension" }, 400);
+  }
+
+  const dataDir = process.env.DB_PATH ? dirname(process.env.DB_PATH) : "./data";
+  const photosDir = `${dataDir}/photos`;
+  mkdirSync(photosDir, { recursive: true });
+
+  const filename = `company-logo.${ext}`;
+  const filepath = `${photosDir}/${filename}`;
+  writeFileSync(filepath, Buffer.from(buffer));
+
+  const logoUrl = `/api/photos/${filename}`;
+  // Save to settings
+  const result = await db.update(settings).set({ value: logoUrl }).where(and(eq(settings.key, "companyLogo"), eq(settings.companyId, companyId))).returning();
+  if (result.length === 0) {
+    await db.insert(settings).values({ key: "companyLogo", value: logoUrl, companyId });
+  }
+
+  return c.json({ logoUrl });
+});
+
+// ── Settings (super_admin only — company name is locked) ─────────
+api.put("/settings", requireSuperAdmin(), async (c) => {
+  const companyId = getCompanyId(c);
+  const data = await c.req.json(); // { key: value, key: value, ... }
+  for (const [key, value] of Object.entries(data)) {
+    // Upsert: try update, if no rows affected then insert
+    const result = await db.update(settings).set({ value: String(value) }).where(and(eq(settings.key, key), eq(settings.companyId, companyId))).returning();
+    if (result.length === 0) {
+      await db.insert(settings).values({ key, value: String(value), companyId });
+    }
+  }
+  const rows = await db.select().from(settings).where(eq(settings.companyId, companyId));
+  const obj: Record<string, string> = {};
+  for (const r of rows) obj[r.key] = r.value;
+  return c.json(obj);
+});
+
+// Admin reset password
+api.post("/users/:id/reset-password", requireRole("admin"), async (c) => {
+  const id = parseInt(c.req.param("id"));
+  const { newPassword } = await c.req.json();
+  if (!newPassword || newPassword.length < 6) {
+    return c.json({ error: "Password must be at least 6 characters" }, 400);
+  }
+  const hash = bcrypt.hashSync(newPassword, 10);
+  await db.update(users).set({ passwordHash: hash }).where(eq(users.id, id));
+  return c.json({ ok: true });
+});
+
+// ── Companies (super_admin only) ────────────────────────────────
+api.get("/companies", requireRole("admin"), async (c) => {
+  const rows = await db.select().from(companies).orderBy(companies.name);
+  return c.json(rows);
+});
+
+api.post("/companies", requireSuperAdmin(), async (c) => {
+  const { name, shortName } = await c.req.json();
+  if (!name) return c.json({ error: "Company name required" }, 400);
+  const [row] = await db.insert(companies).values({ name, shortName }).returning();
+  return c.json(row, 201);
+});
+
+api.put("/companies/:id", requireSuperAdmin(), async (c) => {
+  const id = parseInt(c.req.param("id"));
+  const data = await c.req.json();
+  const [row] = await db.update(companies).set(data).where(eq(companies.id, id)).returning();
+  return c.json(row);
+});
+
+export { api };

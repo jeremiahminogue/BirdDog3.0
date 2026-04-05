@@ -1,0 +1,107 @@
+<script lang="ts">
+  import { onMount } from "svelte";
+  import { api, auth } from "./lib/api";
+  import { user, currentPage, appSettings, selectedEmployeeId } from "./lib/stores";
+  import Login from "./pages/Login.svelte";
+  import Navbar from "./components/Navbar.svelte";
+  import WorkforceBoard from "./pages/WorkforceBoard.svelte";
+  import Employees from "./pages/Employees.svelte";
+  import Jobs from "./pages/Jobs.svelte";
+  import Classifications from "./pages/Classifications.svelte";
+  import Jurisdictions from "./pages/Jurisdictions.svelte";
+  import Admin from "./pages/Admin.svelte";
+  import Reports from "./pages/Reports.svelte";
+  import EmployeeProfile from "./pages/EmployeeProfile.svelte";
+  import Chat from "./pages/Chat.svelte";
+  import Tools from "./pages/Tools.svelte";
+  import Vehicles from "./pages/Vehicles.svelte";
+  import Schedule from "./pages/Schedule.svelte";
+  import MeetingTool from "./pages/MeetingTool.svelte";
+  import ASystemsImport from "./pages/ASystemsImport.svelte";
+  import Opportunities from "./pages/Opportunities.svelte";
+  import GeneralContractors from "./pages/GeneralContractors.svelte";
+  import Suppliers from "./pages/Suppliers.svelte";
+  import DailyReports from "./pages/DailyReports.svelte";
+
+  let loading = true;
+
+  async function loadSettings() {
+    try {
+      const s = await api.get("/settings");
+      appSettings.set({ companyName: s.companyName || "", companyShort: s.companyShort || "" });
+    } catch {
+      // Settings endpoint might not exist yet on older deploys
+    }
+  }
+
+  onMount(async () => {
+    await loadSettings();
+    try {
+      const me = await auth.me();
+      user.set(me);
+    } catch {
+      user.set(null);
+    }
+    loading = false;
+  });
+
+  async function handleLogin(e: CustomEvent) {
+    user.set(e.detail);
+  }
+
+  async function handleLogout() {
+    await auth.logout();
+    user.set(null);
+  }
+</script>
+
+{#if loading}
+  <div class="flex items-center justify-center min-h-screen">
+    <span class="loading loading-spinner loading-lg text-primary"></span>
+  </div>
+{:else if !$user}
+  <Login on:login={handleLogin} />
+{:else}
+  <div class="min-h-screen" style="background: linear-gradient(180deg, #ffffff 0%, #f5f5f7 100%); min-height: 100vh;">
+    <Navbar on:logout={handleLogout} />
+    <main class="p-4 md:p-6 max-w-[1600px] mx-auto pb-20 md:pb-6">
+      {#if $currentPage === "board"}
+        <WorkforceBoard />
+      {:else if $currentPage === "employee-profile" && $selectedEmployeeId}
+        <EmployeeProfile employeeId={$selectedEmployeeId} />
+      {:else if $currentPage === "employees"}
+        <Employees />
+      {:else if $currentPage === "jobs"}
+        <Jobs />
+      {:else if $currentPage === "tools"}
+        <Tools />
+      {:else if $currentPage === "vehicles"}
+        <Vehicles />
+      {:else if $currentPage === "classifications"}
+        <Classifications />
+      {:else if $currentPage === "jurisdictions"}
+        <Jurisdictions />
+      {:else if $currentPage === "schedule"}
+        <Schedule />
+      {:else if $currentPage === "meeting-tool"}
+        <MeetingTool />
+      {:else if $currentPage === "asystems-import"}
+        <ASystemsImport />
+      {:else if $currentPage === "opportunities"}
+        <Opportunities />
+      {:else if $currentPage === "reports"}
+        <Reports />
+      {:else if $currentPage === "admin"}
+        <Admin />
+      {:else if $currentPage === "general-contractors"}
+        <GeneralContractors />
+      {:else if $currentPage === "suppliers"}
+        <Suppliers />
+      {:else if $currentPage === "daily-reports"}
+        <DailyReports />
+      {:else if $currentPage === "chat"}
+        <Chat />
+      {/if}
+    </main>
+  </div>
+{/if}
