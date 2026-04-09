@@ -2,6 +2,9 @@
   import { onMount } from "svelte";
   import { api } from "../lib/api";
   import { user } from "../lib/stores";
+  import ToolReports from "../components/ToolReports.svelte";
+
+  let activeTab: "inventory" | "reports" = "inventory";
 
   interface Asset {
     id: number;
@@ -422,8 +425,17 @@
   <div class="tl-header">
     <div class="tl-header-left">
       <h1 class="tl-title">Tools & Equipment</h1>
-      <span class="tl-count">{filteredAssets.length}{filteredAssets.length !== assets.length ? ` of ${assets.length}` : ""} tools</span>
+      <div class="tl-tabs">
+        <button class="tl-tab" class:tl-tab-active={activeTab === "inventory"} on:click={() => activeTab = "inventory"}>
+          Inventory
+          <span class="tl-tab-count">{assets.length}</span>
+        </button>
+        <button class="tl-tab" class:tl-tab-active={activeTab === "reports"} on:click={() => activeTab = "reports"}>
+          Reports
+        </button>
+      </div>
     </div>
+    {#if activeTab === "inventory"}
     <div class="tl-header-actions">
       <!-- View toggle -->
       <div class="tl-view-toggle">
@@ -448,8 +460,12 @@
         <button class="tl-btn tl-btn-primary" on:click={openAdd}>+ Add Tool</button>
       {/if}
     </div>
+    {/if}
   </div>
 
+  {#if activeTab === "reports"}
+    <ToolReports />
+  {:else}
   <!-- Stats Row -->
   <div class="tl-stats">
     <button class="tl-stat" class:active={filterStatus === "all"} on:click={() => filterStatus = "all"}>
@@ -689,6 +705,7 @@
       {/each}
     </div>
   {/if}
+  {/if}
 </div>
 
 <!-- ═══════ DELETE CONFIRMATION MODAL ═══════ -->
@@ -866,7 +883,15 @@
   .tl-page { max-width: 100%; }
 
   .tl-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
-  .tl-header-left { display: flex; align-items: baseline; gap: 10px; }
+  .tl-header-left { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .tl-tabs { display: flex; gap: 2px; background: #f2f2f7; border-radius: 8px; padding: 2px; }
+  .tl-tab {
+    padding: 6px 16px; border-radius: 6px; font-size: 0.8125rem; font-weight: 600;
+    color: #636366; background: transparent; border: none; cursor: pointer; transition: all 0.15s;
+  }
+  .tl-tab:hover { color: #1d1d1f; }
+  .tl-tab-active { background: #fff; color: #1d1d1f; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+  .tl-tab-count { font-size: 0.6875rem; font-weight: 700; color: #86868b; margin-left: 4px; }
   .tl-header-actions { display: flex; align-items: center; gap: 8px; }
   .tl-title { font-size: 22px; font-weight: 700; color: #1d1d1f; letter-spacing: -0.02em; }
   .tl-count { font-size: 13px; color: #86868b; font-weight: 500; }

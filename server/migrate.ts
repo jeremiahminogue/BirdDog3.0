@@ -333,7 +333,42 @@ addColumn("toolbox_talks", "osha_standard", "TEXT");
 addColumn("toolbox_talks", "completed_at", "TEXT");
 addColumn("toolbox_talk_attendees", "signed_by_name", "TEXT");
 addColumn("toolbox_talk_attendees", "signature_hash", "TEXT");
-// Add 'presented' status — SQLite doesn't support ALTER CHECK, status is just text
+// Fix CHECK constraint to include 'presented' status — SQLite requires table rebuild
+try {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS toolbox_talks_new (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      company_id INTEGER NOT NULL REFERENCES companies(id),
+      job_id INTEGER REFERENCES jobs(id) ON DELETE CASCADE,
+      scheduled_date TEXT NOT NULL,
+      topic TEXT NOT NULL,
+      osha_standard TEXT,
+      generated_content TEXT,
+      presented_by INTEGER REFERENCES employees(id),
+      status TEXT DEFAULT 'draft' CHECK(status IN ('draft','scheduled','presented','completed')),
+      duration INTEGER,
+      notes TEXT,
+      completed_at TEXT,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
+    INSERT INTO toolbox_talks_new SELECT
+      id, company_id, job_id, scheduled_date, topic, osha_standard,
+      generated_content, presented_by, status, duration, notes,
+      completed_at, created_at, updated_at
+    FROM toolbox_talks;
+    DROP TABLE toolbox_talks;
+    ALTER TABLE toolbox_talks_new RENAME TO toolbox_talks;
+  `);
+  // Re-create indexes after table rebuild
+  sqlite.run("CREATE INDEX IF NOT EXISTS idx_toolbox_talks_company ON toolbox_talks(company_id)");
+  sqlite.run("CREATE INDEX IF NOT EXISTS idx_toolbox_talks_job ON toolbox_talks(job_id)");
+  sqlite.run("CREATE INDEX IF NOT EXISTS idx_toolbox_talks_date ON toolbox_talks(scheduled_date)");
+  sqlite.run("CREATE INDEX IF NOT EXISTS idx_toolbox_talks_status ON toolbox_talks(status)");
+} catch (e: any) {
+  // If table already has the correct CHECK or column mismatch, skip
+  console.log("toolbox_talks CHECK migration:", e.message);
+}
 
 // ══════════════════════════════════════════════════════════════════
 // ── ExakTime Replacement: GPS time tracking + live locations ────
@@ -361,6 +396,8 @@ addColumn("time_entries", "source", "TEXT DEFAULT 'manual'");
 addColumn("time_entries", "break_minutes", "INTEGER DEFAULT 0");
 addColumn("time_entries", "lunch_out", "TEXT");
 addColumn("time_entries", "lunch_in", "TEXT");
+addColumn("time_entries", "geofence_approved_by", "INTEGER");
+addColumn("time_entries", "geofence_approved_at", "TEXT");
 
 // Live locations table (crew map — real-time pings from mobile/tablet)
 try {
@@ -419,5 +456,314 @@ try {
 } catch (e: any) {
   if (!e.message?.includes("already exists")) console.error("  ! Error:", e.message);
 }
+
+// ══════════════════════════════════════════════════════════════════
+// ── Mobile App: expand user roles + add employee_id link ────────
+// ══════════════════════════════════════════════════════════════════
+
+// Add employee_id column to users (links user account to employee record)
+addColumn("users", "employee_id", "INTEGER REFERENCES employees(id)");
+
+// Expand role CHECK constraint to include 'foreman' and 'field'
+try {
+  const usersSchema = sqlite.query("SELECT sql FROM sqlite_master WHERE type='table' AND name='users'").get() as any;
+  if (usersSchema?.sql && !usersSchema.sql.includes("foreman")) {
+    console.log("  Upgrading users table to support foreman + field roles...");
+    sqlite.run("PRAGMA foreign_keys = OFF");
+    sqlite.run(`CREATE TABLE users_new (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT NOT NULL UNIQUE,
+      password_hash TEXT NOT NULL,
+      display_name TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'readonly' CHECK(role IN ('super_admin','admin','pm','foreman','field','readonly')),
+      employee_id INTEGER REFERENCES employees(id),
+      company_id INTEGER REFERENCES companies(id),
+      is_active INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT DEFAULT (datetime('now')),
+      last_login TEXT
+    )`);
+    // Copy existing data — use NULL for employee_id if column didn't exist
+    const hasEmployeeId = columnExists("users", "employee_id");
+    if (hasEmployeeId) {
+      sqlite.run(`INSERT INTO users_new (id, username, password_hash, display_name, role, employee_id, company_id, is_active, created_at, last_login)
+        SELECT id, username, password_hash, display_name, role, employee_id, company_id, is_active, created_at, last_login FROM users`);
+    } else {
+      sqlite.run(`INSERT INTO users_new (id, username, password_hash, display_name, role, company_id, is_active, created_at, last_login)
+        SELECT id, username, password_hash, display_name, role, company_id, is_active, created_at, last_login FROM users`);
+    }
+    sqlite.run("DROP TABLE users");
+    sqlite.run("ALTER TABLE users_new RENAME TO users");
+    sqlite.run("PRAGMA foreign_keys = ON");
+    // Re-create session FK index
+    try { sqlite.run("CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)"); } catch {}
+    console.log("  + Users table upgraded with foreman, field roles + employee_id");
+  }
+} catch (e: any) {
+  console.error("  ! Error upgrading users table for mobile:", e.message);
+  try { sqlite.run("PRAGMA foreign_keys = ON"); } catch {}
+}
+
+// ── Migration: Update user roles to field_staff (replace 'field' and 'readonly') ────
+try {
+  const checkInfo = sqlite.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='users'").get() as any;
+  if (checkInfo?.sql && !checkInfo.sql.includes("field_staff")) {
+    console.log("Upgrading user roles to field_staff...");
+    sqlite.run("PRAGMA foreign_keys = OFF");
+    // Map old roles: 'field' → 'field_staff', 'readonly' → 'field_staff'
+    sqlite.run("UPDATE users SET role = 'field_staff' WHERE role IN ('field', 'readonly')");
+    sqlite.run(`CREATE TABLE users_v3 (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT NOT NULL UNIQUE,
+      password_hash TEXT NOT NULL,
+      display_name TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'field_staff' CHECK(role IN ('super_admin','admin','pm','foreman','field_staff')),
+      employee_id INTEGER REFERENCES employees(id),
+      company_id INTEGER REFERENCES companies(id),
+      is_active INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT DEFAULT (datetime('now')),
+      last_login TEXT
+    )`);
+    sqlite.run(`INSERT INTO users_v3 (id, username, password_hash, display_name, role, employee_id, company_id, is_active, created_at, last_login)
+      SELECT id, username, password_hash, display_name, role, employee_id, company_id, is_active, created_at, last_login FROM users`);
+    sqlite.run("DROP TABLE users");
+    sqlite.run("ALTER TABLE users_v3 RENAME TO users");
+    sqlite.run("PRAGMA foreign_keys = ON");
+    try { sqlite.run("CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)"); } catch {}
+    console.log("  + User roles updated: field_staff, foreman, pm, admin, super_admin");
+  }
+} catch (e: any) {
+  console.error("  ! Error upgrading user roles:", e.message);
+  try { sqlite.run("PRAGMA foreign_keys = ON"); } catch {}
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── Time Entry Issues (clock in/out problems needing resolution) ──
+// ══════════════════════════════════════════════════════════════════
+try {
+  sqlite.run(`CREATE TABLE IF NOT EXISTS time_entry_issues (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id INTEGER NOT NULL REFERENCES companies(id),
+    time_entry_id INTEGER REFERENCES time_entries(id) ON DELETE CASCADE,
+    employee_id INTEGER NOT NULL REFERENCES employees(id),
+    issue_type TEXT NOT NULL CHECK(issue_type IN ('missed_clock_out', 'outside_geofence', 'missing_photo', 'excessive_hours')),
+    issue_details TEXT,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'noted', 'approved', 'rejected')),
+    employee_note TEXT,
+    employee_noted_at TEXT,
+    resolved_by INTEGER REFERENCES employees(id),
+    resolved_at TEXT,
+    manager_note TEXT,
+    report_date TEXT NOT NULL,
+    last_notified_at TEXT,
+    detected_at TEXT DEFAULT (datetime('now')),
+    created_at TEXT DEFAULT (datetime('now'))
+  )`);
+  console.log("  + Created time_entry_issues table");
+} catch (e: any) {
+  if (!e.message?.includes("already exists")) console.error("  ! Error:", e.message);
+}
+
+// ── Push Notification Tokens ──────────────────────────────────────
+try {
+  sqlite.run(`CREATE TABLE IF NOT EXISTS push_tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id INTEGER NOT NULL REFERENCES companies(id),
+    employee_id INTEGER NOT NULL REFERENCES employees(id),
+    token TEXT NOT NULL,
+    platform TEXT CHECK(platform IN ('ios', 'android')),
+    is_active INTEGER DEFAULT 1,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+  )`);
+  console.log("  + Created push_tokens table");
+} catch (e: any) {
+  if (!e.message?.includes("already exists")) console.error("  ! Error:", e.message);
+}
+
+// ── Indexes for issues + push tokens ──────────────────────────────
+const issueIndexes = [
+  "CREATE INDEX IF NOT EXISTS idx_issues_employee_status ON time_entry_issues(employee_id, status)",
+  "CREATE INDEX IF NOT EXISTS idx_issues_company_status ON time_entry_issues(company_id, status)",
+  "CREATE INDEX IF NOT EXISTS idx_issues_time_entry ON time_entry_issues(time_entry_id)",
+  // Prevents duplicate issues: same time entry can only have one issue of each type
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_issues_unique_per_entry ON time_entry_issues(time_entry_id, issue_type)",
+  "CREATE INDEX IF NOT EXISTS idx_push_tokens_employee ON push_tokens(employee_id)",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_push_tokens_unique ON push_tokens(employee_id, token)",
+];
+for (const sql of issueIndexes) {
+  try { sqlite.run(sql); } catch (e: any) { /* skip */ }
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── Announcements (Communicate feature) ─────────────────────────
+// ══════════════════════════════════════════════════════════════════
+try {
+  sqlite.run(`CREATE TABLE IF NOT EXISTS announcements (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id INTEGER NOT NULL REFERENCES companies(id),
+    sent_by INTEGER NOT NULL REFERENCES users(id),
+    title TEXT NOT NULL,
+    body TEXT NOT NULL,
+    priority TEXT NOT NULL DEFAULT 'normal' CHECK(priority IN ('normal', 'urgent')),
+    audience TEXT NOT NULL CHECK(audience IN ('company', 'job', 'individual')),
+    target_job_id INTEGER REFERENCES jobs(id),
+    target_employee_id INTEGER REFERENCES employees(id),
+    push_sent INTEGER DEFAULT 0,
+    push_failed INTEGER DEFAULT 0,
+    sent_at TEXT DEFAULT (datetime('now'))
+  )`);
+  console.log("  + Created announcements table");
+} catch (e: any) {
+  if (!e.message?.includes("already exists")) console.error("  ! Error:", e.message);
+}
+
+try {
+  sqlite.run(`CREATE TABLE IF NOT EXISTS announcement_reads (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    announcement_id INTEGER NOT NULL REFERENCES announcements(id) ON DELETE CASCADE,
+    employee_id INTEGER NOT NULL REFERENCES employees(id),
+    read_at TEXT DEFAULT (datetime('now'))
+  )`);
+  console.log("  + Created announcement_reads table");
+} catch (e: any) {
+  if (!e.message?.includes("already exists")) console.error("  ! Error:", e.message);
+}
+
+// Indexes for announcements
+const announcementIndexes = [
+  "CREATE INDEX IF NOT EXISTS idx_announcements_company ON announcements(company_id, sent_at)",
+  "CREATE INDEX IF NOT EXISTS idx_announcements_audience ON announcements(audience, target_job_id, target_employee_id)",
+  "CREATE INDEX IF NOT EXISTS idx_announcement_reads_ann ON announcement_reads(announcement_id)",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_announcement_reads_unique ON announcement_reads(announcement_id, employee_id)",
+];
+for (const sql of announcementIndexes) {
+  try { sqlite.run(sql); } catch (e: any) { /* skip */ }
+}
+
+// ── Time Correction Requests ──
+try {
+  sqlite.run(`CREATE TABLE IF NOT EXISTS time_correction_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id INTEGER NOT NULL REFERENCES companies(id),
+    time_entry_id INTEGER REFERENCES time_entries(id) ON DELETE CASCADE,
+    issue_id INTEGER REFERENCES time_entry_issues(id),
+    employee_id INTEGER NOT NULL REFERENCES employees(id),
+    correction_type TEXT NOT NULL CHECK(correction_type IN ('missed_clock_out', 'wrong_time', 'wrong_job', 'other')),
+    requested_clock_in TEXT,
+    requested_clock_out TEXT,
+    requested_job_id INTEGER REFERENCES jobs(id),
+    note TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'approved', 'rejected')),
+    resolved_by INTEGER REFERENCES users(id),
+    resolved_at TEXT,
+    manager_note TEXT,
+    report_date TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now'))
+  )`);
+} catch (e: any) {
+  if (!e.message.includes("already exists")) console.warn("time_correction_requests:", e.message);
+}
+
+try { sqlite.run(`CREATE INDEX IF NOT EXISTS idx_tcr_employee ON time_correction_requests(employee_id, status)`); } catch {}
+try { sqlite.run(`CREATE INDEX IF NOT EXISTS idx_tcr_company ON time_correction_requests(company_id, status)`); } catch {}
+
+// ── Tool Reports ──────────────────────────────────────────────────
+try {
+  sqlite.run(`CREATE TABLE IF NOT EXISTS tool_reports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id INTEGER NOT NULL REFERENCES companies(id),
+    asset_id INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+    reported_by INTEGER NOT NULL REFERENCES employees(id),
+    report_type TEXT NOT NULL CHECK(report_type IN ('damaged', 'lost', 'stolen', 'needs_maintenance', 'needs_calibration')),
+    severity TEXT NOT NULL CHECK(severity IN ('can_still_use', 'out_of_service', 'safety_hazard')),
+    description TEXT NOT NULL,
+    photo_url TEXT,
+    lat REAL,
+    lng REAL,
+    status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open', 'acknowledged', 'in_repair', 'resolved')),
+    resolved_by INTEGER REFERENCES users(id),
+    resolved_at TEXT,
+    resolution_note TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+  )`);
+} catch (e: any) {
+  if (!e.message.includes("already exists")) console.warn("tool_reports:", e.message);
+}
+
+try { sqlite.run(`CREATE INDEX IF NOT EXISTS idx_tool_reports_asset ON tool_reports(asset_id, status)`); } catch {}
+try { sqlite.run(`CREATE INDEX IF NOT EXISTS idx_tool_reports_company ON tool_reports(company_id, status)`); } catch {}
+try { sqlite.run(`CREATE INDEX IF NOT EXISTS idx_tool_reports_reporter ON tool_reports(reported_by)`); } catch {}
+
+// ── Tool History (immutable audit log) ──────────────────────────
+try {
+  sqlite.run(`CREATE TABLE IF NOT EXISTS tool_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id INTEGER NOT NULL REFERENCES companies(id),
+    asset_id INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+    event_type TEXT NOT NULL CHECK(event_type IN (
+      'assigned', 'unassigned', 'transferred', 'returned',
+      'reported_damaged', 'reported_lost', 'reported_stolen',
+      'reported_maintenance', 'reported_calibration',
+      'sent_to_repair', 'repaired', 'calibrated',
+      'condition_changed', 'status_changed', 'retired', 'created'
+    )),
+    employee_id INTEGER REFERENCES employees(id),
+    job_id INTEGER REFERENCES jobs(id),
+    from_employee_id INTEGER REFERENCES employees(id),
+    to_employee_id INTEGER REFERENCES employees(id),
+    note TEXT,
+    report_id INTEGER REFERENCES tool_reports(id),
+    performed_by INTEGER REFERENCES users(id),
+    lat REAL,
+    lng REAL,
+    created_at TEXT DEFAULT (datetime('now'))
+  )`);
+} catch (e: any) {
+  if (!e.message.includes("already exists")) console.warn("tool_history:", e.message);
+}
+
+try { sqlite.run(`CREATE INDEX IF NOT EXISTS idx_tool_history_asset ON tool_history(asset_id)`); } catch {}
+try { sqlite.run(`CREATE INDEX IF NOT EXISTS idx_tool_history_company ON tool_history(company_id)`); } catch {}
+
+// ── Time Off Requests ──────────────────────────────────────────
+try {
+  sqlite.run(`CREATE TABLE IF NOT EXISTS time_off_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id INTEGER NOT NULL REFERENCES companies(id),
+    employee_id INTEGER NOT NULL REFERENCES employees(id),
+    request_type TEXT NOT NULL CHECK(request_type IN ('paid_sick_leave', 'time_off', 'general_note')),
+    start_date TEXT NOT NULL,
+    end_date TEXT,
+    hours_requested REAL,
+    note TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'approved', 'rejected')),
+    resolved_by INTEGER REFERENCES users(id),
+    resolved_at TEXT,
+    manager_note TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+  )`);
+} catch (e: any) {
+  if (!e.message.includes("already exists")) console.warn("time_off_requests:", e.message);
+}
+try { sqlite.run(`CREATE INDEX IF NOT EXISTS idx_time_off_requests_employee ON time_off_requests(employee_id, status)`); } catch {}
+try { sqlite.run(`CREATE INDEX IF NOT EXISTS idx_time_off_requests_company ON time_off_requests(company_id, status)`); } catch {}
+
+// ── Employee PTO / Sick Balances ───────────────────────────────
+try {
+  sqlite.run(`CREATE TABLE IF NOT EXISTS employee_pto_balances (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id INTEGER NOT NULL REFERENCES companies(id),
+    employee_id INTEGER NOT NULL REFERENCES employees(id),
+    balance_type TEXT NOT NULL CHECK(balance_type IN ('pto', 'sick')),
+    accrued_hours REAL NOT NULL DEFAULT 0,
+    used_hours REAL NOT NULL DEFAULT 0,
+    adjusted_hours REAL NOT NULL DEFAULT 0,
+    updated_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(company_id, employee_id, balance_type)
+  )`);
+} catch (e: any) {
+  if (!e.message.includes("already exists")) console.warn("employee_pto_balances:", e.message);
+}
+try { sqlite.run(`CREATE INDEX IF NOT EXISTS idx_pto_balances_employee ON employee_pto_balances(employee_id)`); } catch {}
 
 console.log("Migrations complete.");

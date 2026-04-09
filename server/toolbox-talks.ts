@@ -183,7 +183,7 @@ toolboxTalkRoutes.get("/:id", requireRole(...ALLOWED_ROLES), async (c) => {
 
   const attendees = sqlite.prepare(`
     SELECT tta.id, tta.talk_id, tta.employee_id, tta.signed_at, tta.signed_by_name, tta.signature_hash,
-      e.first_name, e.last_name, e.employee_number,
+      e.first_name, e.last_name, e.employee_number, e.photo_url,
       c.name AS classification_name
     FROM toolbox_talk_attendees tta
     LEFT JOIN employees e ON tta.employee_id = e.id
@@ -256,12 +256,25 @@ toolboxTalkRoutes.post("/", requireRole(...ALLOWED_ROLES), async (c) => {
     for (const row of crewIds) ins.run(talkId, row.employee_id);
   }
 
-  // Return full talk with attendees
-  const talk: any = sqlite.prepare("SELECT * FROM toolbox_talks WHERE id = ?").get(talkId);
+  // Return full talk with JOINs (same shape as GET /:id)
+  const talk: any = sqlite.prepare(`
+    SELECT tt.*,
+      j.name AS job_name, j.job_number, j.address AS job_address,
+      e.first_name AS presenter_first_name, e.last_name AS presenter_last_name
+    FROM toolbox_talks tt
+    LEFT JOIN jobs j ON tt.job_id = j.id
+    LEFT JOIN employees e ON tt.presented_by = e.id
+    WHERE tt.id = ?
+  `).get(talkId);
   const attendees = sqlite.prepare(`
-    SELECT tta.*, e.first_name, e.last_name, e.employee_number
-    FROM toolbox_talk_attendees tta LEFT JOIN employees e ON tta.employee_id = e.id
-    WHERE tta.talk_id = ? ORDER BY e.last_name, e.first_name
+    SELECT tta.id, tta.talk_id, tta.employee_id, tta.signed_at, tta.signed_by_name, tta.signature_hash,
+      e.first_name, e.last_name, e.employee_number, e.photo_url,
+      c.name AS classification_name
+    FROM toolbox_talk_attendees tta
+    LEFT JOIN employees e ON tta.employee_id = e.id
+    LEFT JOIN classifications c ON e.classification_id = c.id
+    WHERE tta.talk_id = ?
+    ORDER BY e.last_name, e.first_name
   `).all(talkId);
 
   return c.json({ ...talk, attendees }, 201);
@@ -295,8 +308,35 @@ toolboxTalkRoutes.put("/:id", requireRole(...ALLOWED_ROLES), async (c) => {
   fields.push("updated_at = datetime('now')");
   values.push(id, companyId);
 
-  sqlite.prepare(`UPDATE toolbox_talks SET ${fields.join(", ")} WHERE id = ? AND company_id = ?`).run(...values);
-  return c.json({ ok: true });
+  try {
+    sqlite.prepare(`UPDATE toolbox_talks SET ${fields.join(", ")} WHERE id = ? AND company_id = ?`).run(...values);
+
+    // Return full talk with JOINs (same shape as GET /:id)
+    const updated: any = sqlite.prepare(`
+      SELECT tt.*,
+        j.name AS job_name, j.job_number, j.address AS job_address,
+        e.first_name AS presenter_first_name, e.last_name AS presenter_last_name
+      FROM toolbox_talks tt
+      LEFT JOIN jobs j ON tt.job_id = j.id
+      LEFT JOIN employees e ON tt.presented_by = e.id
+      WHERE tt.id = ? AND tt.company_id = ?
+    `).get(id, companyId);
+    const attendees = sqlite.prepare(`
+      SELECT tta.id, tta.talk_id, tta.employee_id, tta.signed_at, tta.signed_by_name, tta.signature_hash,
+        e.first_name, e.last_name, e.employee_number, e.photo_url,
+        c.name AS classification_name
+      FROM toolbox_talk_attendees tta
+      LEFT JOIN employees e ON tta.employee_id = e.id
+      LEFT JOIN classifications c ON e.classification_id = c.id
+      WHERE tta.talk_id = ?
+      ORDER BY e.last_name, e.first_name
+    `).all(id);
+
+    return c.json({ ...updated, attendees });
+  } catch (err: any) {
+    console.error("PUT /toolbox-talks/:id error:", err?.message, err?.stack);
+    return c.json({ error: "Update failed", detail: err?.message }, 500);
+  }
 });
 
 // ── DELETE /:id — delete toolbox talk (admin only) ──────────────

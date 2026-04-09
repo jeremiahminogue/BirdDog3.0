@@ -193,30 +193,41 @@ mapsRoutes.get("/reverse-geocode", async (c) => {
 mapsRoutes.get("/static-map", async (c) => {
   const lat = c.req.query("lat");
   const lng = c.req.query("lng");
-  const zoom = c.req.query("zoom") || "15";
+  const zoom = c.req.query("zoom");
   const size = c.req.query("size") || "600x300";
-  const markers = c.req.query("markers"); // pipe-separated: "lat,lng|lat,lng"
+  const markers = c.req.query("markers");     // pipe-separated blue: "lat,lng|lat,lng"
+  const jobMarker = c.req.query("jobMarker"); // "lat,lng" — shown as green pin for job site
 
-  if (!lat || !lng) return c.json({ error: "lat and lng required" }, 400);
   if (!GOOGLE_API_KEY) return c.json({ error: "Maps API not configured" }, 503);
 
   try {
     const params = new URLSearchParams({
-      center: `${lat},${lng}`,
-      zoom,
       size,
       maptype: "roadmap",
       key: GOOGLE_API_KEY,
     });
 
-    // Add center marker
-    params.append("markers", `color:red|${lat},${lng}`);
+    // If center/zoom given, use explicit positioning; otherwise Google auto-fits to markers
+    if (lat && lng && zoom) {
+      params.set("center", `${lat},${lng}`);
+      params.set("zoom", zoom);
+    }
 
-    // Add additional markers if provided
+    // Red pin for primary point (clock-in location)
+    if (lat && lng) {
+      params.append("markers", `color:red|${lat},${lng}`);
+    }
+
+    // Blue pins for additional markers (clock-out, etc.)
     if (markers) {
       for (const m of markers.split("|")) {
         params.append("markers", `color:blue|${m}`);
       }
+    }
+
+    // Green pin for job site location
+    if (jobMarker) {
+      params.append("markers", `color:green|label:J|${jobMarker}`);
     }
 
     // Proxy the image through our server so key stays hidden

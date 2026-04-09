@@ -8,11 +8,17 @@ import { nanoid } from "nanoid";
 import type { Context, Next } from "hono";
 
 const SESSION_DAYS = 7;
+const MOBILE_SESSION_DAYS = 30; // longer sessions for mobile
 const SESSION_REFRESH_AFTER_MS = 24 * 60 * 60 * 1000; // refresh if session older than 1 day
 
 // ── Auth middleware ──────────────────────────────────────────────
 export async function requireAuth(c: Context, next: Next) {
-  const token = getCookie(c, "session");
+  // Support both cookie (web) and Bearer token (mobile)
+  let token = getCookie(c, "session");
+  const authHeader = c.req.header("Authorization");
+  if (!token && authHeader?.startsWith("Bearer ")) {
+    token = authHeader.slice(7);
+  }
   if (!token) return c.json({ error: "Not authenticated" }, 401);
 
   const now = new Date().toISOString();
@@ -124,12 +130,36 @@ auth.post("/login", async (c) => {
     path: "/",
   });
 
+  // Look up linked employee if any
+  let employee = null;
+  if (user.employeeId) {
+    const { employees } = await import("../shared/schema.js");
+    const [emp] = await db.select().from(employees).where(eq(employees.id, user.employeeId)).limit(1);
+    if (emp) {
+      employee = {
+        id: emp.id,
+        firstName: emp.firstName,
+        lastName: emp.lastName,
+        photoUrl: (emp as any).photoUrl || null,
+        classification: (emp as any).classificationName || null,
+      };
+    }
+  }
+
   return c.json({
+    token, // mobile app stores this for Bearer auth
     id: user.id,
     username: user.username,
     displayName: user.displayName,
     role: user.role,
     companyId: user.companyId,
+    user: {
+      id: user.id,
+      username: user.username,
+      role: user.role,
+      employeeId: user.employeeId || null,
+    },
+    employee,
   });
 });
 

@@ -169,8 +169,6 @@ export const JobSchema = z.object({
   startDate: optDate(),
   endDate: optDate(),
   scopeOfWork: optStr(5000),
-  originalContract: optNum(),
-  currentContract: optNum(),
   showOnBoard: optBool(),
 }).passthrough();
 
@@ -238,7 +236,7 @@ export const UserSchema = z.object({
   displayName: str(100),
   role: z.preprocess(
     (v) => (v === "" || v === null || v === undefined) ? undefined : v,
-    z.enum(["super_admin", "admin", "pm", "readonly"]).optional()
+    z.enum(["super_admin", "admin", "pm", "foreman", "field_staff"]).optional()
   ),
   password: z.preprocess(
     (v) => (v === "" || v === null || v === undefined) ? undefined : v,

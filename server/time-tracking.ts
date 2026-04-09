@@ -7,6 +7,7 @@ import { eq, and, desc, sql, gte, lte, isNull, isNotNull } from "drizzle-orm";
 import { requireAuth, requireRole } from "./auth.js";
 import { getCompanyId } from "./tenant.js";
 import { mkdirSync, writeFileSync } from "fs";
+import { runDailyIssueNotifications, detectIssuesForCompany } from "./notifications.js";
 
 const timeTrackingRoutes = new Hono();
 timeTrackingRoutes.use("/*", requireAuth);
@@ -363,7 +364,12 @@ timeTrackingRoutes.get("/entries", requireRole("super_admin"), async (c) => {
       te.*,
       e.first_name, e.last_name, e.employee_number,
       j.name AS job_name, j.job_number,
-      c.name AS classification_name
+      c.name AS classification_name,
+      (SELECT GROUP_CONCAT(i.status || ':' || i.issue_type, '|')
+       FROM time_entry_issues i
+       WHERE i.time_entry_id = te.id) AS issue_statuses,
+      (SELECT COUNT(*) FROM time_correction_requests cr
+       WHERE cr.time_entry_id = te.id AND cr.status = 'pending') AS pending_corrections
     FROM time_entries te
     LEFT JOIN employees e ON te.employee_id = e.id
     LEFT JOIN jobs j ON te.job_id = j.id
@@ -406,11 +412,14 @@ timeTrackingRoutes.get("/entries/:id", requireRole("super_admin"), async (c) => 
       e.first_name, e.last_name, e.employee_number, e.photo_url AS employee_photo,
       j.name AS job_name, j.job_number, j.address AS job_address,
       j.latitude AS job_lat, j.longitude AS job_lng, j.geofence_radius,
-      c.name AS classification_name
+      c.name AS classification_name,
+      approver.first_name AS approver_first_name, approver.last_name AS approver_last_name
     FROM time_entries te
     LEFT JOIN employees e ON te.employee_id = e.id
     LEFT JOIN jobs j ON te.job_id = j.id
     LEFT JOIN classifications c ON te.classification_id = c.id
+    LEFT JOIN users approver_u ON te.geofence_approved_by = approver_u.id
+    LEFT JOIN employees approver ON approver_u.employee_id = approver.id
     WHERE te.id = ? AND te.company_id = ?
   `).get(id, companyId);
 
@@ -429,7 +438,7 @@ timeTrackingRoutes.get("/entries/:id", requireRole("super_admin"), async (c) => 
 
 
 // ── MANUAL ENTRY — office creates time entry ────────────────────
-timeTrackingRoutes.post("/entries", requireRole("super_admin"), async (c) => {
+timeTrackingRoutes.post("/entries", requireRole("admin", "pm"), async (c) => {
   const companyId = getCompanyId(c);
   const body = await c.req.json();
   const now = new Date().toISOString();
@@ -464,7 +473,7 @@ timeTrackingRoutes.post("/entries", requireRole("super_admin"), async (c) => {
 
 
 // ── EDIT ENTRY — office adjusts hours/notes ─────────────────────
-timeTrackingRoutes.put("/entries/:id", requireRole("super_admin"), async (c) => {
+timeTrackingRoutes.put("/entries/:id", requireRole("admin", "pm"), async (c) => {
   const companyId = getCompanyId(c);
   const id = Number(c.req.param("id"));
   const body = await c.req.json();
@@ -559,6 +568,40 @@ timeTrackingRoutes.post("/entries/:id/adjust", requireRole("super_admin"), async
 
   const updated = sqlite.query(`SELECT * FROM time_entries WHERE id = ?`).get(id);
   return c.json({ success: true, entry: updated });
+});
+
+
+// ── APPROVE GEOFENCE — dismiss geofence flag without changing times ──
+timeTrackingRoutes.post("/entries/:id/approve-geofence", requireRole("super_admin"), async (c) => {
+  const companyId = getCompanyId(c);
+  const id = Number(c.req.param("id"));
+  const user = c.get("user") as any;
+  const approverName = `${user?.firstName || ""} ${user?.lastName || ""}`.trim() || "Admin";
+
+  const entry = sqlite.query(
+    `SELECT id, clock_in_inside_geofence, clock_out_inside_geofence, geofence_approved_by
+     FROM time_entries WHERE id = ? AND company_id = ?`
+  ).get(id, companyId) as any;
+
+  if (!entry) return c.json({ error: "Entry not found" }, 404);
+
+  const hasGeoIssue = entry.clock_in_inside_geofence === 0 || entry.clock_out_inside_geofence === 0;
+  if (!hasGeoIssue) return c.json({ error: "No geofence issue to approve" }, 400);
+
+  const now = new Date().toISOString();
+  sqlite.run(
+    `UPDATE time_entries SET geofence_approved_by = ?, geofence_approved_at = ?, updated_at = ? WHERE id = ? AND company_id = ?`,
+    [user?.id || 0, now, now, id, companyId]
+  );
+
+  // Log it in the audit trail
+  sqlite.run(
+    `INSERT INTO time_entry_adjustments (time_entry_id, adjusted_by, field_changed, old_value, new_value, reason)
+     VALUES (?, ?, 'geofence_status', 'flagged', 'approved', 'Geofence location approved by management')`,
+    [id, user?.employeeId || user?.id || 0]
+  );
+
+  return c.json({ success: true, approvedBy: approverName, approvedAt: now });
 });
 
 
@@ -741,5 +784,453 @@ function savePhoto(companyId: number, employeeId: number, type: string, base64: 
   return `/api/photos/time-tracking/${fname}`;
 }
 
+
+// ══════════════════════════════════════════════════════════════════
+// ── TIME ENTRY ISSUES — detection + management resolution ────────
+// ══════════════════════════════════════════════════════════════════
+
+// ── POST /time-tracking/detect-issues — scan for problems ────────
+// Called manually by admin. Uses the shared detection function from notifications.ts
+timeTrackingRoutes.post("/detect-issues", requireRole("super_admin"), async (c) => {
+  const companyId = getCompanyId(c);
+  const body = await c.req.json().catch(() => ({}));
+
+  if (body.date) {
+    // Scan a specific date
+    const created = detectIssuesForCompany(companyId, body.date);
+    return c.json({ success: true, issuesCreated: created, date: body.date });
+  }
+
+  // Default: scan each of the last 30 days
+  let totalCreated = 0;
+  for (let i = 1; i <= 30; i++) {
+    const d = new Date(Date.now() - i * 86400000);
+    totalCreated += detectIssuesForCompany(companyId, d.toISOString().split("T")[0]);
+  }
+  return c.json({ success: true, issuesCreated: totalCreated, scanned: "last 30 days" });
+});
+
+
+// ── GET /time-tracking/issues — list all issues (management view) ──
+timeTrackingRoutes.get("/issues", requireRole("super_admin"), async (c) => {
+  const companyId = getCompanyId(c);
+  const status = c.req.query("status"); // pending, noted, approved, rejected
+  const employeeId = c.req.query("employeeId");
+  const limit = Number(c.req.query("limit")) || 50;
+  const offset = Number(c.req.query("offset")) || 0;
+
+  let where = `i.company_id = ?`;
+  const params: any[] = [companyId];
+
+  if (status) {
+    where += ` AND i.status = ?`;
+    params.push(status);
+  }
+  if (employeeId) {
+    where += ` AND i.employee_id = ?`;
+    params.push(Number(employeeId));
+  }
+
+  const issues = sqlite.query(`
+    SELECT i.*,
+           e.first_name || ' ' || e.last_name as employee_name,
+           j.job_number, j.name as job_name,
+           te.clock_in, te.clock_out, te.hours_regular, te.hours_overtime,
+           te.clock_in_photo_url, te.clock_out_photo_url,
+           re.first_name || ' ' || re.last_name as resolved_by_name
+    FROM time_entry_issues i
+    LEFT JOIN employees e ON i.employee_id = e.id
+    LEFT JOIN time_entries te ON i.time_entry_id = te.id
+    LEFT JOIN jobs j ON te.job_id = j.id
+    LEFT JOIN employees re ON i.resolved_by = re.id
+    WHERE ${where}
+    ORDER BY
+      CASE i.status WHEN 'noted' THEN 0 WHEN 'pending' THEN 1 WHEN 'rejected' THEN 2 ELSE 3 END,
+      i.report_date DESC
+    LIMIT ? OFFSET ?
+  `).all(...params, limit, offset);
+
+  const countResult = sqlite.query(`
+    SELECT COUNT(*) as total FROM time_entry_issues i WHERE ${where}
+  `).get(...params) as any;
+
+  // Also get summary counts
+  const counts = sqlite.query(`
+    SELECT status, COUNT(*) as count FROM time_entry_issues
+    WHERE company_id = ?
+    GROUP BY status
+  `).all(companyId) as any[];
+
+  return c.json({
+    issues,
+    total: countResult?.total || 0,
+    counts: Object.fromEntries(counts.map((r: any) => [r.status, r.count])),
+  });
+});
+
+
+// ── POST /time-tracking/issues/:id/approve — manager approves ────
+timeTrackingRoutes.post("/issues/:id/approve", requireRole("super_admin"), async (c) => {
+  const companyId = getCompanyId(c);
+  const issueId = Number(c.req.param("id"));
+  const user = c.get("user") as any;
+  const body = await c.req.json().catch(() => ({}));
+
+  const issue = sqlite.query(`
+    SELECT * FROM time_entry_issues WHERE id = ? AND company_id = ?
+  `).get(issueId, companyId) as any;
+
+  if (!issue) return c.json({ error: "Issue not found" }, 404);
+  if (issue.status === "approved") return c.json({ error: "Already approved" }, 400);
+
+  const now = new Date().toISOString();
+  sqlite.run(`
+    UPDATE time_entry_issues
+    SET status = 'approved', resolved_by = ?, resolved_at = ?, manager_note = ?
+    WHERE id = ?
+  `, [user?.employeeId || user?.id || 0, now, body.note?.trim() || null, issueId]);
+
+  return c.json({ success: true, status: "approved" });
+});
+
+
+// ── POST /time-tracking/issues/:id/reject — manager rejects ─────
+timeTrackingRoutes.post("/issues/:id/reject", requireRole("super_admin"), async (c) => {
+  const companyId = getCompanyId(c);
+  const issueId = Number(c.req.param("id"));
+  const user = c.get("user") as any;
+  const body = await c.req.json();
+
+  if (!body.note || !body.note.trim()) {
+    return c.json({ error: "A note is required when rejecting" }, 400);
+  }
+
+  const issue = sqlite.query(`
+    SELECT * FROM time_entry_issues WHERE id = ? AND company_id = ?
+  `).get(issueId, companyId) as any;
+
+  if (!issue) return c.json({ error: "Issue not found" }, 404);
+
+  const now = new Date().toISOString();
+  sqlite.run(`
+    UPDATE time_entry_issues
+    SET status = 'rejected', resolved_by = ?, resolved_at = ?, manager_note = ?
+    WHERE id = ?
+  `, [user?.employeeId || user?.id || 0, now, body.note.trim(), issueId]);
+
+  return c.json({ success: true, status: "rejected" });
+});
+
+
+// ── POST /time-tracking/send-notifications — manually trigger notification run ──
+timeTrackingRoutes.post("/send-notifications", requireRole("super_admin"), async (c) => {
+  const result = await runDailyIssueNotifications();
+  return c.json({ success: true, ...result });
+});
+
+
+// ══════════════════════════════════════════════════════════════════
+// ── CORRECTION REQUESTS — management review ──────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+// ── GET /time-tracking/corrections — list pending corrections ────
+timeTrackingRoutes.get("/corrections", requireRole("admin", "pm"), async (c) => {
+  const companyId = getCompanyId(c);
+  const status = c.req.query("status") || "pending";
+
+  const corrections = sqlite.query(`
+    SELECT cr.*,
+           e.first_name || ' ' || e.last_name as employee_name,
+           te.clock_in, te.clock_out, te.hours_regular, te.hours_overtime,
+           j.job_number, j.name as job_name,
+           rj.job_number as requested_job_number, rj.name as requested_job_name
+    FROM time_correction_requests cr
+    JOIN employees e ON cr.employee_id = e.id
+    LEFT JOIN time_entries te ON cr.time_entry_id = te.id
+    LEFT JOIN jobs j ON te.job_id = j.id
+    LEFT JOIN jobs rj ON cr.requested_job_id = rj.id
+    WHERE cr.company_id = ? AND cr.status = ?
+    ORDER BY cr.created_at DESC
+    LIMIT 100
+  `).all(companyId, status);
+
+  return c.json({ corrections });
+});
+
+// ── POST /time-tracking/corrections/:id/approve — approve + apply ─
+timeTrackingRoutes.post("/corrections/:id/approve", requireRole("admin"), async (c) => {
+  const companyId = getCompanyId(c);
+  const user = c.get("user");
+  const corrId = Number(c.req.param("id"));
+  const body = await c.req.json();
+  const now = new Date().toISOString();
+
+  const corr = sqlite.query(`
+    SELECT * FROM time_correction_requests WHERE id = ? AND company_id = ?
+  `).get(corrId, companyId) as any;
+  if (!corr) return c.json({ error: "Correction not found" }, 404);
+  if (corr.status !== "pending") return c.json({ error: "Already resolved" }, 400);
+
+  // Apply the correction to the time entry if requested times provided
+  if (corr.time_entry_id && (corr.requested_clock_in || corr.requested_clock_out)) {
+    const updates: string[] = [];
+    const params: any[] = [];
+
+    if (corr.requested_clock_in) {
+      updates.push("clock_in = ?");
+      params.push(corr.requested_clock_in);
+    }
+    if (corr.requested_clock_out) {
+      updates.push("clock_out = ?");
+      params.push(corr.requested_clock_out);
+    }
+    if (corr.requested_job_id) {
+      updates.push("job_id = ?");
+      params.push(corr.requested_job_id);
+    }
+
+    if (updates.length > 0) {
+      params.push(corr.time_entry_id);
+      sqlite.run(`UPDATE time_entries SET ${updates.join(", ")} WHERE id = ?`, params);
+    }
+  }
+
+  // Mark correction as approved
+  sqlite.run(`
+    UPDATE time_correction_requests
+    SET status = 'approved', resolved_by = ?, resolved_at = ?, manager_note = ?
+    WHERE id = ?
+  `, [user?.id || 0, now, body.note?.trim() || null, corrId]);
+
+  // If linked to an issue, approve that too
+  if (corr.issue_id) {
+    sqlite.run(`
+      UPDATE time_entry_issues
+      SET status = 'approved', resolved_by = ?, resolved_at = ?, manager_note = ?
+      WHERE id = ?
+    `, [user?.employeeId || user?.id || 0, now, "Auto-approved via correction request", corr.issue_id]);
+  }
+
+  return c.json({ success: true });
+});
+
+// ── POST /time-tracking/corrections/:id/reject ───────────────────
+timeTrackingRoutes.post("/corrections/:id/reject", requireRole("admin"), async (c) => {
+  const companyId = getCompanyId(c);
+  const user = c.get("user");
+  const corrId = Number(c.req.param("id"));
+  const body = await c.req.json();
+  const now = new Date().toISOString();
+
+  if (!body.note?.trim()) return c.json({ error: "A note is required when rejecting" }, 400);
+
+  const corr = sqlite.query(`
+    SELECT * FROM time_correction_requests WHERE id = ? AND company_id = ?
+  `).get(corrId, companyId) as any;
+  if (!corr) return c.json({ error: "Correction not found" }, 404);
+  if (corr.status !== "pending") return c.json({ error: "Already resolved" }, 400);
+
+  sqlite.run(`
+    UPDATE time_correction_requests
+    SET status = 'rejected', resolved_by = ?, resolved_at = ?, manager_note = ?
+    WHERE id = ?
+  `, [user?.id || 0, now, body.note.trim(), corrId]);
+
+  return c.json({ success: true });
+});
+
+// ══════════════════════════════════════════════════════════════
+// ── TIME OFF REQUESTS ─────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════
+
+// ── GET /time-tracking/time-off — list requests (office) ──────
+timeTrackingRoutes.get("/time-off", requireRole("admin", "pm"), async (c) => {
+  const companyId = getCompanyId(c);
+  const status = c.req.query("status") || "";
+  const type = c.req.query("type") || "";
+
+  let where = "tor.company_id = ?";
+  const params: any[] = [companyId];
+  if (status) { where += " AND tor.status = ?"; params.push(status); }
+  if (type) { where += " AND tor.request_type = ?"; params.push(type); }
+
+  const requests = sqlite.query(`
+    SELECT tor.*,
+      e.first_name, e.last_name,
+      u.display_name AS resolver_name
+    FROM time_off_requests tor
+    LEFT JOIN employees e ON e.id = tor.employee_id
+    LEFT JOIN users u ON u.id = tor.resolved_by
+    WHERE ${where}
+    ORDER BY tor.created_at DESC
+    LIMIT 200
+  `).all(...params);
+
+  return c.json({ requests });
+});
+
+// ── GET /time-tracking/time-off/stats — counts by status/type ─
+timeTrackingRoutes.get("/time-off/stats", requireRole("admin", "pm"), async (c) => {
+  const companyId = getCompanyId(c);
+  const stats = sqlite.query(`
+    SELECT status, request_type, COUNT(*) AS count
+    FROM time_off_requests WHERE company_id = ?
+    GROUP BY status, request_type
+  `).all(companyId);
+  return c.json({ stats });
+});
+
+// ── POST /time-tracking/time-off/:id/approve ──────────────────
+timeTrackingRoutes.post("/time-off/:id/approve", requireRole("admin"), async (c) => {
+  const companyId = getCompanyId(c);
+  const id = Number(c.req.param("id"));
+  const body = await c.req.json();
+  const user = c.get("user" as never) as any;
+  const now = new Date().toISOString();
+
+  const req: any = sqlite.query(
+    `SELECT * FROM time_off_requests WHERE id = ? AND company_id = ?`
+  ).get(id, companyId);
+  if (!req) return c.json({ error: "Request not found" }, 404);
+  if (req.status !== "pending") return c.json({ error: "Already resolved" }, 400);
+
+  sqlite.query(`
+    UPDATE time_off_requests
+    SET status = 'approved', resolved_by = ?, resolved_at = ?, manager_note = ?
+    WHERE id = ?
+  `).run(user?.id || 0, now, body.note?.trim() || null, id);
+
+  // Deduct from PTO/sick balance if applicable
+  if ((req.request_type === "time_off" || req.request_type === "paid_sick_leave") && req.hours_requested > 0) {
+    const balanceType = req.request_type === "paid_sick_leave" ? "sick" : "pto";
+    // Ensure balance row exists
+    sqlite.query(`
+      INSERT OR IGNORE INTO employee_pto_balances (company_id, employee_id, balance_type, accrued_hours, used_hours, adjusted_hours)
+      VALUES (?, ?, ?, 0, 0, 0)
+    `).run(companyId, req.employee_id, balanceType);
+    // Deduct
+    sqlite.query(`
+      UPDATE employee_pto_balances
+      SET used_hours = used_hours + ?, updated_at = ?
+      WHERE company_id = ? AND employee_id = ? AND balance_type = ?
+    `).run(req.hours_requested, now, companyId, req.employee_id, balanceType);
+  }
+
+  return c.json({ success: true });
+});
+
+// ── POST /time-tracking/time-off/:id/reject ───────────────────
+timeTrackingRoutes.post("/time-off/:id/reject", requireRole("admin"), async (c) => {
+  const companyId = getCompanyId(c);
+  const id = Number(c.req.param("id"));
+  const body = await c.req.json();
+  const user = c.get("user" as never) as any;
+  const now = new Date().toISOString();
+
+  const req: any = sqlite.query(
+    `SELECT * FROM time_off_requests WHERE id = ? AND company_id = ?`
+  ).get(id, companyId);
+  if (!req) return c.json({ error: "Request not found" }, 404);
+  if (req.status !== "pending") return c.json({ error: "Already resolved" }, 400);
+
+  sqlite.query(`
+    UPDATE time_off_requests
+    SET status = 'rejected', resolved_by = ?, resolved_at = ?, manager_note = ?
+    WHERE id = ?
+  `).run(user?.id || 0, now, body.note?.trim() || null, id);
+
+  return c.json({ success: true });
+});
+
+
+// ══════════════════════════════════════════════════════════════
+// ── PTO / SICK BALANCES ───────────────────────────────────────
+// ══════════════════════════════════════════════════════════════
+
+// ── GET /time-tracking/pto-balances — all employee balances ───
+timeTrackingRoutes.get("/pto-balances", requireRole("admin", "pm"), async (c) => {
+  const companyId = getCompanyId(c);
+  const balances = sqlite.query(`
+    SELECT pb.*,
+      e.first_name, e.last_name,
+      (pb.accrued_hours + pb.adjusted_hours - pb.used_hours) AS available_hours
+    FROM employee_pto_balances pb
+    JOIN employees e ON e.id = pb.employee_id
+    WHERE pb.company_id = ?
+    ORDER BY e.last_name, e.first_name, pb.balance_type
+  `).all(companyId);
+  return c.json({ balances });
+});
+
+// ── GET /time-tracking/pto-balances/:employeeId — single employee ─
+timeTrackingRoutes.get("/pto-balances/:employeeId", requireAuth, async (c) => {
+  const companyId = getCompanyId(c);
+  const empId = Number(c.req.param("employeeId"));
+  const balances = sqlite.query(`
+    SELECT *,
+      (accrued_hours + adjusted_hours - used_hours) AS available_hours
+    FROM employee_pto_balances
+    WHERE company_id = ? AND employee_id = ?
+  `).all(companyId, empId);
+  return c.json({ balances });
+});
+
+// ── POST /time-tracking/pto-balances/adjust — admin adjust balance ─
+timeTrackingRoutes.post("/pto-balances/adjust", requireRole("admin"), async (c) => {
+  const companyId = getCompanyId(c);
+  const body = await c.req.json();
+  const { employeeId, balanceType, accruedHours, adjustedHours } = body;
+  const now = new Date().toISOString();
+
+  if (!employeeId || !balanceType) return c.json({ error: "employeeId and balanceType required" }, 400);
+  if (!["pto", "sick"].includes(balanceType)) return c.json({ error: "balanceType must be pto or sick" }, 400);
+
+  // Upsert balance
+  sqlite.query(`
+    INSERT INTO employee_pto_balances (company_id, employee_id, balance_type, accrued_hours, used_hours, adjusted_hours, updated_at)
+    VALUES (?, ?, ?, ?, 0, ?, ?)
+    ON CONFLICT(company_id, employee_id, balance_type) DO UPDATE SET
+      accrued_hours = COALESCE(?, accrued_hours),
+      adjusted_hours = COALESCE(?, adjusted_hours),
+      updated_at = ?
+  `).run(
+    companyId, employeeId, balanceType,
+    accruedHours || 0, adjustedHours || 0, now,
+    accruedHours !== undefined ? accruedHours : null,
+    adjustedHours !== undefined ? adjustedHours : null,
+    now
+  );
+
+  return c.json({ success: true });
+});
+
+// ── POST /time-tracking/pto-balances/accrue-bulk — batch accrual ──
+timeTrackingRoutes.post("/pto-balances/accrue-bulk", requireRole("admin"), async (c) => {
+  const companyId = getCompanyId(c);
+  const body = await c.req.json();
+  const { balanceType, hoursPerEmployee } = body;
+  const now = new Date().toISOString();
+
+  if (!balanceType || !hoursPerEmployee) return c.json({ error: "balanceType and hoursPerEmployee required" }, 400);
+
+  // Get all active employees
+  const activeEmps: any[] = sqlite.query(
+    `SELECT id FROM employees WHERE company_id = ? AND status = 'active'`
+  ).all(companyId);
+
+  let count = 0;
+  for (const emp of activeEmps) {
+    sqlite.query(`
+      INSERT INTO employee_pto_balances (company_id, employee_id, balance_type, accrued_hours, used_hours, adjusted_hours, updated_at)
+      VALUES (?, ?, ?, ?, 0, 0, ?)
+      ON CONFLICT(company_id, employee_id, balance_type) DO UPDATE SET
+        accrued_hours = accrued_hours + ?,
+        updated_at = ?
+    `).run(companyId, emp.id, balanceType, hoursPerEmployee, now, hoursPerEmployee, now);
+    count++;
+  }
+
+  return c.json({ success: true, employeesUpdated: count });
+});
 
 export { timeTrackingRoutes };

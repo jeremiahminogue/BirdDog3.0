@@ -26,6 +26,8 @@
   import CrewMap from "./pages/CrewMap.svelte";
   import ToolboxTalks from "./pages/ToolboxTalks.svelte";
   import ChangeOrders from "./pages/ChangeOrders.svelte";
+  import JobCodes from "./pages/JobCodes.svelte";
+  import Communicate from "./pages/Communicate.svelte";
 
   let loading = true;
 
@@ -111,6 +113,10 @@
         <ToolboxTalks />
       {:else if $currentPage === "change-orders"}
         <ChangeOrders />
+      {:else if $currentPage === "job-codes"}
+        <JobCodes />
+      {:else if $currentPage === "communicate"}
+        <Communicate />
       {:else if $currentPage === "chat"}
         <Chat />
       {/if}

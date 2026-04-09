@@ -27,8 +27,7 @@
     address: string;
     gcContact: string;
     status: string;
-    originalContract: number;
-    currentContract: number;
+    contractAmount: number;
     crew: BoardEmployee[];
     crewCount: number;
     budgets: any[];

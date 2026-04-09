@@ -621,6 +621,133 @@ seedComprehensiveRoutes.post("/comprehensive", requireRole("super_admin"), async
   counts.scheduledMoves = moveCount;
 
   // ══════════════════════════════════════════════════════════════
+  // 13. ASSETS (Tools, Vehicles, Equipment)
+  // ══════════════════════════════════════════════════════════════
+  sqlite.run(`DELETE FROM assets WHERE company_id = ?`, [companyId]);
+
+  // Find Trevor Terra specifically for guaranteed assignment
+  const trevorTerra = employees.find(
+    (e: any) => e.first_name === "Trevor" && e.last_name === "Terra"
+  );
+
+  // Pick a few other random employees for assignments
+  const otherEmps = employees.filter(
+    (e: any) => !(e.first_name === "Trevor" && e.last_name === "Terra")
+  );
+
+  function randomEmp() {
+    return otherEmps.length > 0 ? randomItem(otherEmps) : employees[0];
+  }
+
+  const toolData = [
+    // ── Vehicles ──
+    { type: "vehicle", category: "truck", description: "2023 Ford F-250 Super Duty", manufacturer: "Ford", model: "F-250 XLT 4x4", serialNumber: "1FT7W2B66PEC12345", identifier: "V-001", status: "assigned", condition: "good", cost: 52000, assignTo: "trevor" },
+    { type: "vehicle", category: "truck", description: "2022 Ford F-150 Lightning", manufacturer: "Ford", model: "F-150 Lightning Pro", serialNumber: "1FTVW1EL4NWA98765", identifier: "V-002", status: "assigned", condition: "good", cost: 48500, assignTo: "random" },
+    { type: "vehicle", category: "truck", description: "2024 Ram 2500 Tradesman", manufacturer: "Ram", model: "2500 Tradesman Crew Cab", serialNumber: "3C6UR5CL8RG234567", identifier: "V-003", status: "assigned", condition: "new", cost: 54000, assignTo: "random" },
+    { type: "vehicle", category: "van", description: "2023 Ford Transit 250", manufacturer: "Ford", model: "Transit 250 Cargo Van", serialNumber: "1FTBW9CK5PKA45678", identifier: "V-004", status: "assigned", condition: "good", cost: 42000, assignTo: "random" },
+    { type: "vehicle", category: "truck", description: "2021 Chevy Silverado 2500HD", manufacturer: "Chevrolet", model: "Silverado 2500HD Work Truck", serialNumber: "1GC4YPEY3MF678901", identifier: "V-005", status: "maintenance", condition: "fair", cost: 46000, assignTo: null },
+    { type: "vehicle", category: "trailer", description: "2022 Big Tex 14ET-20 Equipment Trailer", manufacturer: "Big Tex", model: "14ET-20", serialNumber: "16VCX2024N2345678", identifier: "V-006", status: "available", condition: "good", cost: 8500, assignTo: null },
+
+    // ── Power Tools — Trevor's kit ──
+    { type: "tool", category: "power_tool", description: 'Milwaukee M18 FUEL 1/2" Hammer Drill', manufacturer: "Milwaukee", model: "2904-20", serialNumber: "J43AD190300456", identifier: "T-001", status: "assigned", condition: "good", cost: 199, assignTo: "trevor" },
+    { type: "tool", category: "power_tool", description: 'Milwaukee M18 FUEL 1/4" Hex Impact Driver', manufacturer: "Milwaukee", model: "2953-20", serialNumber: "J43BF210400789", identifier: "T-002", status: "assigned", condition: "good", cost: 179, assignTo: "trevor" },
+    { type: "tool", category: "power_tool", description: "Milwaukee M18 FUEL SAWZALL Reciprocating Saw", manufacturer: "Milwaukee", model: "2821-20", serialNumber: "J44CD310500123", identifier: "T-003", status: "assigned", condition: "good", cost: 219, assignTo: "trevor" },
+    { type: "tool", category: "power_tool", description: 'Milwaukee M18 FUEL 7-1/4" Circular Saw', manufacturer: "Milwaukee", model: "2732-20", serialNumber: "J44EF410600234", identifier: "T-004", status: "assigned", condition: "good", cost: 249, assignTo: "trevor" },
+    { type: "tool", category: "power_tool", description: 'Milwaukee M12 FUEL 3" Compact Cut Off Tool', manufacturer: "Milwaukee", model: "2522-20", serialNumber: "K21GH510700345", identifier: "T-005", status: "assigned", condition: "new", cost: 149, assignTo: "trevor" },
+    { type: "tool", category: "test_equipment", description: "Fluke 376 FC True-RMS Clamp Meter", manufacturer: "Fluke", model: "376 FC", serialNumber: "48230456", identifier: "T-006", status: "assigned", condition: "good", cost: 425, assignTo: "trevor" },
+    { type: "tool", category: "test_equipment", description: "Fluke 1587 FC Insulation Multimeter", manufacturer: "Fluke", model: "1587 FC", serialNumber: "51120789", identifier: "T-007", status: "assigned", condition: "good", cost: 899, assignTo: "trevor" },
+
+    // ── Power Tools — shared / other crew ──
+    { type: "tool", category: "power_tool", description: 'Milwaukee M18 FUEL 1/2" Hammer Drill', manufacturer: "Milwaukee", model: "2904-20", serialNumber: "J43AD190301122", identifier: "T-008", status: "assigned", condition: "good", cost: 199, assignTo: "random" },
+    { type: "tool", category: "power_tool", description: 'Milwaukee M18 FUEL 1/4" Hex Impact Driver', manufacturer: "Milwaukee", model: "2953-20", serialNumber: "J43BF210401456", identifier: "T-009", status: "assigned", condition: "fair", cost: 179, assignTo: "random" },
+    { type: "tool", category: "power_tool", description: "Milwaukee M18 FUEL SAWZALL Reciprocating Saw", manufacturer: "Milwaukee", model: "2821-20", serialNumber: "J44CD310501789", identifier: "T-010", status: "assigned", condition: "good", cost: 219, assignTo: "random" },
+    { type: "tool", category: "power_tool", description: "Hilti TE 6-A22 Cordless Rotary Hammer", manufacturer: "Hilti", model: "TE 6-A22", serialNumber: "H2103456789", identifier: "T-011", status: "assigned", condition: "good", cost: 459, assignTo: "random" },
+    { type: "tool", category: "power_tool", description: "Milwaukee M18 FUEL Band Saw", manufacturer: "Milwaukee", model: "2729-20", serialNumber: "J55AB610800456", identifier: "T-012", status: "available", condition: "good", cost: 329, assignTo: null },
+    { type: "tool", category: "power_tool", description: 'Milwaukee M18 FUEL 4-1/2" Grinder', manufacturer: "Milwaukee", model: "2880-20", serialNumber: "J55CD710900567", identifier: "T-013", status: "available", condition: "good", cost: 189, assignTo: null },
+    { type: "tool", category: "power_tool", description: "DeWalt 20V MAX XR Drywall Screw Gun", manufacturer: "DeWalt", model: "DCF620B", serialNumber: "DW2205678901", identifier: "T-014", status: "assigned", condition: "good", cost: 169, assignTo: "random" },
+
+    // ── Test Equipment ──
+    { type: "tool", category: "test_equipment", description: "Fluke 376 FC True-RMS Clamp Meter", manufacturer: "Fluke", model: "376 FC", serialNumber: "48230789", identifier: "T-015", status: "assigned", condition: "good", cost: 425, assignTo: "random" },
+    { type: "tool", category: "test_equipment", description: "Megger MIT485/2 Insulation Tester", manufacturer: "Megger", model: "MIT485/2", serialNumber: "MG1904567890", identifier: "T-016", status: "available", condition: "good", cost: 1200, assignTo: null },
+    { type: "tool", category: "test_equipment", description: "Ideal SureTrace Circuit Tracer", manufacturer: "Ideal", model: "61-957", serialNumber: "ID6105678901", identifier: "T-017", status: "assigned", condition: "good", cost: 289, assignTo: "random" },
+    { type: "tool", category: "test_equipment", description: "Amprobe AT-6010 Advanced Wire Tracer", manufacturer: "Amprobe", model: "AT-6010", serialNumber: "AP3302345678", identifier: "T-018", status: "assigned", condition: "fair", cost: 345, assignTo: "trevor" },
+
+    // ── Specialty / Large Equipment ──
+    { type: "equipment", category: "bending", description: "Greenlee 881CT Cam Track Bender (2-1/2 to 4 in)", manufacturer: "Greenlee", model: "881CT", serialNumber: "GL881CT56789", identifier: "E-001", status: "assigned", condition: "good", cost: 8900, assignTo: "random" },
+    { type: "equipment", category: "bending", description: "Greenlee 555 Classic Electric Bender", manufacturer: "Greenlee", model: "555", serialNumber: "GL555E45678", identifier: "E-002", status: "available", condition: "good", cost: 4200, assignTo: null },
+    { type: "equipment", category: "pulling", description: "Greenlee 6001 Super Tugger Cable Puller", manufacturer: "Greenlee", model: "6001", serialNumber: "GL600178901", identifier: "E-003", status: "assigned", condition: "good", cost: 6500, assignTo: "random" },
+    { type: "equipment", category: "lifting", description: "Genie GS-1930 Scissor Lift", manufacturer: "Genie", model: "GS-1930", serialNumber: "GS19309876543", identifier: "E-004", status: "assigned", condition: "good", cost: 14500, assignTo: null },
+    { type: "equipment", category: "lifting", description: "JLG 450AJ Articulating Boom Lift", manufacturer: "JLG", model: "450AJ", serialNumber: "JLG450AJ12345", identifier: "E-005", status: "available", condition: "good", cost: 85000, assignTo: null },
+    { type: "equipment", category: "generator", description: "Honda EU7000iS Portable Generator", manufacturer: "Honda", model: "EU7000iS", serialNumber: "EZGA1234567", identifier: "E-006", status: "assigned", condition: "good", cost: 4599, assignTo: "random" },
+    { type: "equipment", category: "threading", description: "Ridgid 300 Compact Power Threading Machine", manufacturer: "Ridgid", model: "300 Compact", serialNumber: "RD300C34567", identifier: "E-007", status: "available", condition: "fair", cost: 3200, assignTo: null },
+
+    // ── Hand Tools & Safety (bulk, unassigned/shared) ──
+    { type: "tool", category: "hand_tool", description: 'Klein 11-in-1 Screwdriver/Nut Driver', manufacturer: "Klein Tools", model: "32500", serialNumber: null, identifier: "T-019", status: "assigned", condition: "good", cost: 22, assignTo: "trevor" },
+    { type: "tool", category: "hand_tool", description: "Klein Journeyman Wire Stripper (10-18 AWG)", manufacturer: "Klein Tools", model: "11055", serialNumber: null, identifier: "T-020", status: "assigned", condition: "good", cost: 28, assignTo: "trevor" },
+    { type: "tool", category: "hand_tool", description: "Knipex 10\" Cobra Pliers", manufacturer: "Knipex", model: "87 01 250", serialNumber: null, identifier: "T-021", status: "assigned", condition: "good", cost: 38, assignTo: "trevor" },
+    { type: "tool", category: "safety", description: "Milwaukee Class E Hard Hat (Type 1)", manufacturer: "Milwaukee", model: "48-73-1000", serialNumber: null, identifier: "S-001", status: "assigned", condition: "good", cost: 32, assignTo: "trevor" },
+    { type: "tool", category: "safety", description: "3M SecureFit 400 Safety Glasses (12pk)", manufacturer: "3M", model: "SF400", serialNumber: null, identifier: "S-002", status: "available", condition: "new", cost: 85, assignTo: null },
+  ];
+
+  let assetCount = 0;
+  for (const t of toolData) {
+    const empId = t.assignTo === "trevor"
+      ? trevorTerra?.id || null
+      : t.assignTo === "random"
+        ? randomEmp()?.id || null
+        : null;
+    const jobId = empId && activeJobs.length > 0
+      ? randomItem(activeJobs).id
+      : null;
+
+    sqlite.run(
+      `INSERT INTO assets (company_id, type, category, description, manufacturer, model, serial_number, identifier,
+         assigned_to_employee, assigned_to_job, status, condition, purchase_date, purchase_cost, warranty_expires, notes, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
+      [
+        companyId, t.type, t.category, t.description, t.manufacturer, t.model,
+        t.serialNumber, t.identifier, empId, jobId,
+        empId ? "assigned" : t.status, t.condition,
+        randomDate(365, 0),
+        t.cost,
+        t.cost > 500 ? dateStr(randomInt(180, 730)) : null,
+        null,
+      ]
+    );
+    assetCount++;
+  }
+  counts.assets = assetCount;
+
+  // 14. JOB CODES (work type categories for time tracking)
+  sqlite.run(`DELETE FROM job_codes WHERE company_id = ?`, [companyId]);
+
+  const defaultJobCodes = [
+    { code: "RGH", description: "Rough-In", sortOrder: 1 },
+    { code: "TRIM", description: "Trim / Finish", sortOrder: 2 },
+    { code: "SVC", description: "Service Call", sortOrder: 3 },
+    { code: "DEMO", description: "Demo / Tear-Out", sortOrder: 4 },
+    { code: "PANEL", description: "Panel / Switchgear", sortOrder: 5 },
+    { code: "FIRE", description: "Fire Alarm", sortOrder: 6 },
+    { code: "LOW-V", description: "Low Voltage / Data", sortOrder: 7 },
+    { code: "UNDER", description: "Underground / Slab", sortOrder: 8 },
+    { code: "TEMP", description: "Temporary Power", sortOrder: 9 },
+    { code: "MATL", description: "Material Handling", sortOrder: 10 },
+    { code: "MEET", description: "Meeting / Training", sortOrder: 11 },
+    { code: "TRAVEL", description: "Travel / Drive Time", sortOrder: 12 },
+    { code: "PUNCH", description: "Punch List", sortOrder: 13 },
+    { code: "WARR", description: "Warranty Work", sortOrder: 14 },
+    { code: "OTHER", description: "Other", sortOrder: 99 },
+  ];
+
+  for (const jc of defaultJobCodes) {
+    sqlite.run(
+      `INSERT INTO job_codes (company_id, code, description, is_active, sort_order) VALUES (?, ?, ?, 1, ?)`,
+      [companyId, jc.code, jc.description, jc.sortOrder]
+    );
+  }
+  counts.jobCodes = defaultJobCodes.length;
+
+  // ══════════════════════════════════════════════════════════════
   // SUMMARY
   // ══════════════════════════════════════════════════════════════
   return c.json({

@@ -21,7 +21,11 @@ import { timeTrackingRoutes } from "./time-tracking.js";
 import { mapsRoutes } from "./maps.js";
 import { seedTimeTrackingRoutes } from "./seed-time-tracking.js";
 import { seedComprehensiveRoutes } from "./seed-comprehensive.js";
+import { fieldRoutes } from "./routes-field.js";
+import announceRoutes from "./announcements.js";
+import { toolMgmtRoutes } from "./tool-management.js";
 import { sanitizeBody } from "./validation.js";
+import { startNotificationScheduler, runDailyIssueNotifications } from "./notifications.js";
 
 // Initialize database
 try {
@@ -85,9 +89,15 @@ app.use("/api/*", cors({
 
 // CSRF protection: require X-Requested-With header on all mutating requests
 // Browsers won't send custom headers cross-origin without CORS preflight
+// Skip for mobile app requests (identified by Bearer token in Authorization header)
 app.use("/api/*", async (c, next) => {
   const method = c.req.method;
   if (method === "GET" || method === "HEAD" || method === "OPTIONS") {
+    return next();
+  }
+  // Mobile app uses Bearer token — skip CSRF check (token itself is the auth proof)
+  const authHeader = c.req.header("Authorization");
+  if (authHeader?.startsWith("Bearer ")) {
     return next();
   }
   const xrw = c.req.header("X-Requested-With");
@@ -122,6 +132,9 @@ app.route("/api/toolbox-talks", toolboxTalkRoutes);
 app.route("/api/change-orders", changeOrderRoutes);
 app.route("/api/time-tracking", timeTrackingRoutes);
 app.route("/api/maps", mapsRoutes);
+app.route("/api/field", fieldRoutes);
+app.route("/api/announcements", announceRoutes);
+app.route("/api/tool-management", toolMgmtRoutes);
 app.route("/api/seed", seedTimeTrackingRoutes);
 app.route("/api/seed", seedComprehensiveRoutes);
 
@@ -198,6 +211,9 @@ app.get("*", async (c) => {
 
 const port = parseInt(process.env.PORT || "3000");
 console.log(`⚡ PE Management running on http://localhost:${port}`);
+
+// Start daily notification scheduler (7:30 AM push notifications for clock issues)
+startNotificationScheduler();
 
 export default {
   port,

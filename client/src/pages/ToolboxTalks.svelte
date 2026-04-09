@@ -30,7 +30,7 @@
 		employee_id: number;
 		first_name: string;
 		last_name: string;
-		classification: string | null;
+		classification_name: string | null;
 		photo_url: string | null;
 		signed_at: string | null;
 		signed_by_name: string | null;
@@ -47,7 +47,7 @@
 		id: number;
 		first_name: string;
 		last_name: string;
-		classification: string | null;
+		classification_name: string | null;
 	}
 
 	// ── State ──────────────────────────────────────────────────────
@@ -118,7 +118,7 @@
 	}
 	function getJobNumber(jobId: number) {
 		const j = jobs.find(j => j.id === jobId);
-		return j ? j.job_number : '';
+		return j ? (j.jobNumber || j.job_number || '') : '';
 	}
 
 	function getAvailableEmployees() {
@@ -132,7 +132,7 @@
 		error = null;
 		try {
 			const [talksRes, statsRes, jobsRes, empsRes, topicsRes] = await Promise.all([
-				api.get('/toolbox-talks/'),
+				api.get('/toolbox-talks'),
 				api.get('/toolbox-talks/stats/summary'),
 				api.get('/jobs'),
 				api.get('/employees'),
@@ -169,13 +169,21 @@
 
 	$: selectedTopicInfo = oshaTopics.find(t => t.topic === createForm.topic) || null;
 
+	// ── Fetch full talk detail (reused after every mutation) ──────
+	async function refreshTalk(talkId: number) {
+		const detail = await api.get(`/toolbox-talks/${talkId}`);
+		selectedTalk = detail;
+		editedContent = detail.generated_content || '';
+		// Update list row too
+		talks = talks.map(t => t.id === detail.id ? { ...t, ...detail, attendee_count: detail.attendees?.length || 0, signed_count: (detail.attendees || []).filter((a: Attendee) => a.signed_at).length } : t);
+		return detail;
+	}
+
 	// ── Select talk ───────────────────────────────────────────────
 	async function selectTalk(talk: Talk) {
 		try {
-			const detail = await api.get(`/toolbox-talks/${talk.id}`);
-			selectedTalk = detail;
+			await refreshTalk(talk.id);
 			editingContent = false;
-			editedContent = detail.generated_content || '';
 		} catch (e) {
 			error = 'Failed to load talk details';
 		}
@@ -215,7 +223,7 @@
 		}
 		creating = true;
 		try {
-			await api.post('/toolbox-talks/', {
+			const newTalk = await api.post('/toolbox-talks', {
 				jobId: createForm.jobId,
 				scheduledDate: createForm.scheduledDate,
 				topic: createForm.topic,
@@ -225,6 +233,11 @@
 			});
 			showCreateModal = false;
 			await loadData();
+			// Auto-select the newly created talk
+			if (newTalk?.id) {
+				await refreshTalk(newTalk.id);
+				editingContent = false;
+			}
 		} catch (e) {
 			error = 'Failed to create talk';
 		} finally {
@@ -237,10 +250,8 @@
 		if (!selectedTalk) return;
 		generating = true;
 		try {
-			const updated = await api.post(`/toolbox-talks/${selectedTalk.id}/generate`, {});
-			selectedTalk = updated;
-			editedContent = updated.generated_content || '';
-			talks = talks.map(t => t.id === updated.id ? { ...t, ...updated } : t);
+			await api.post(`/toolbox-talks/${selectedTalk.id}/generate`, {});
+			await refreshTalk(selectedTalk.id);
 		} catch (e) {
 			error = 'Failed to generate content';
 		} finally {
@@ -252,9 +263,8 @@
 	async function saveContentEdit() {
 		if (!selectedTalk) return;
 		try {
-			const updated = await api.put(`/toolbox-talks/${selectedTalk.id}`, { generated_content: editedContent });
-			selectedTalk = updated;
-			talks = talks.map(t => t.id === updated.id ? { ...t, ...updated } : t);
+			await api.put(`/toolbox-talks/${selectedTalk.id}`, { generatedContent: editedContent });
+			await refreshTalk(selectedTalk.id);
 			editingContent = false;
 		} catch (e) {
 			error = 'Failed to save content';
@@ -265,9 +275,8 @@
 	async function autoPopulateAttendees() {
 		if (!selectedTalk) return;
 		try {
-			const updated = await api.post(`/toolbox-talks/${selectedTalk.id}/attendees/batch`, {});
-			selectedTalk = updated;
-			talks = talks.map(t => t.id === updated.id ? { ...t, attendee_count: updated.attendees?.length || t.attendee_count } : t);
+			await api.post(`/toolbox-talks/${selectedTalk.id}/attendees/batch`, {});
+			await refreshTalk(selectedTalk.id);
 		} catch (e) {
 			error = 'Failed to auto-populate attendees';
 		}
@@ -276,9 +285,8 @@
 	async function addAttendee(empId: number) {
 		if (!selectedTalk) return;
 		try {
-			const updated = await api.post(`/toolbox-talks/${selectedTalk.id}/attendees`, { employeeId: empId });
-			selectedTalk = updated;
-			talks = talks.map(t => t.id === updated.id ? { ...t, attendee_count: updated.attendees?.length || t.attendee_count } : t);
+			await api.post(`/toolbox-talks/${selectedTalk.id}/attendees`, { employeeId: empId });
+			await refreshTalk(selectedTalk.id);
 		} catch (e) {
 			error = 'Failed to add attendee';
 		}
@@ -287,9 +295,8 @@
 	async function removeAttendee(attendeeId: number) {
 		if (!selectedTalk) return;
 		try {
-			const updated = await api.del(`/toolbox-talks/${selectedTalk.id}/attendees/${attendeeId}`);
-			selectedTalk = updated;
-			talks = talks.map(t => t.id === updated.id ? { ...t, attendee_count: updated.attendees?.length || t.attendee_count } : t);
+			await api.del(`/toolbox-talks/${selectedTalk.id}/attendees/${attendeeId}`);
+			await refreshTalk(selectedTalk.id);
 		} catch (e) {
 			error = 'Failed to remove attendee';
 		}
@@ -298,15 +305,9 @@
 	async function signAttendee(attendeeId: number) {
 		if (!selectedTalk) return;
 		try {
-			const updated = await api.put(`/toolbox-talks/${selectedTalk.id}/attendees/${attendeeId}/sign`, {});
-			selectedTalk = updated;
-			// Refresh stats if auto-completed
-			if (updated.status === 'completed') {
-				stats = await api.get('/toolbox-talks/stats/summary');
-				talks = talks.map(t => t.id === updated.id ? { ...t, ...updated, signed_count: (updated.attendees || []).filter((a: Attendee) => a.signed_at).length } : t);
-			} else {
-				talks = talks.map(t => t.id === updated.id ? { ...t, signed_count: (updated.attendees || []).filter((a: Attendee) => a.signed_at).length } : t);
-			}
+			await api.put(`/toolbox-talks/${selectedTalk.id}/attendees/${attendeeId}/sign`, {});
+			await refreshTalk(selectedTalk.id);
+			stats = await api.get('/toolbox-talks/stats/summary');
 		} catch (e) {
 			error = 'Failed to sign attendee';
 		}
@@ -316,9 +317,8 @@
 	async function updateStatus(newStatus: string) {
 		if (!selectedTalk) return;
 		try {
-			const updated = await api.put(`/toolbox-talks/${selectedTalk.id}`, { status: newStatus });
-			selectedTalk = updated;
-			talks = talks.map(t => t.id === updated.id ? { ...t, ...updated } : t);
+			await api.put(`/toolbox-talks/${selectedTalk.id}`, { status: newStatus });
+			await refreshTalk(selectedTalk.id);
 			stats = await api.get('/toolbox-talks/stats/summary');
 		} catch (e) {
 			error = 'Failed to update status';
@@ -395,7 +395,7 @@
 		<select class="tt-job-filter" bind:value={filterJobId}>
 			<option value="">All Jobs</option>
 			{#each jobs as job (job.id)}
-				<option value={String(job.id)}>{job.job_number} — {job.name}</option>
+				<option value={String(job.id)}>{job.jobNumber} — {job.name}</option>
 			{/each}
 		</select>
 	</div>
@@ -544,8 +544,8 @@
 										</div>
 										<div class="tt-att-info">
 											<div class="tt-att-name">{att.first_name} {att.last_name}</div>
-											{#if att.classification}
-												<div class="tt-att-class">{att.classification}</div>
+											{#if att.classification_name}
+												<div class="tt-att-class">{att.classification_name}</div>
 											{/if}
 										</div>
 									</div>
@@ -571,7 +571,7 @@
 						<select class="tt-add-attendee" on:change={handleAttendeeSelect}>
 							<option value="">+ Add Attendee</option>
 							{#each getAvailableEmployees() as emp (emp.id)}
-								<option value={emp.id}>{emp.first_name} {emp.last_name}</option>
+								<option value={emp.id}>{emp.firstName} {emp.lastName}</option>
 							{/each}
 						</select>
 					{/if}
@@ -625,7 +625,7 @@
 					<select bind:value={createForm.jobId}>
 						<option value="">Select job…</option>
 						{#each jobs as job (job.id)}
-							<option value={String(job.id)}>{job.job_number} — {job.name}</option>
+							<option value={String(job.id)}>{job.jobNumber} — {job.name}</option>
 						{/each}
 					</select>
 				</label>
@@ -683,7 +683,7 @@
 					<select bind:value={createForm.presentedBy}>
 						<option value="">Select presenter…</option>
 						{#each employees as emp (emp.id)}
-							<option value={String(emp.id)}>{emp.first_name} {emp.last_name}</option>
+							<option value={String(emp.id)}>{emp.firstName} {emp.lastName}</option>
 						{/each}
 					</select>
 				</label>

@@ -25,7 +25,6 @@
       jurisdictionId: null as number | null,
       status: "planning" as string,
       startDate: "", endDate: "", scopeOfWork: "",
-      originalContract: 0, currentContract: 0,
       showOnBoard: true,
     };
   }
@@ -117,8 +116,6 @@
       startDate: job.startDate || "",
       endDate: job.endDate || "",
       scopeOfWork: job.scopeOfWork || "",
-      originalContract: job.originalContract || 0,
-      currentContract: job.currentContract || 0,
       showOnBoard: job.showOnBoard !== false,
     };
     showAddModal = true;
@@ -161,7 +158,7 @@
           va = (a.address || "").toLowerCase(); vb = (b.address || "").toLowerCase();
           break;
         case "contract":
-          va = a.currentContract || 0; vb = b.currentContract || 0;
+          va = a.contractAmount || 0; vb = b.contractAmount || 0;
           break;
         case "gc":
           va = (a.gcContact || "").toLowerCase(); vb = (b.gcContact || "").toLowerCase();
@@ -353,17 +350,6 @@
               <option value={j.id}>{j.name}</option>
             {/each}
           </select>
-        </div>
-
-        <div class="grid grid-cols-2 gap-3">
-          <div class="form-control">
-            <label class="label label-text text-xs" for="jobOC">Original Contract</label>
-            <input id="jobOC" class="input input-sm input-bordered" type="number" bind:value={form.originalContract} />
-          </div>
-          <div class="form-control">
-            <label class="label label-text text-xs" for="jobCC">Current Contract</label>
-            <input id="jobCC" class="input input-sm input-bordered" type="number" bind:value={form.currentContract} />
-          </div>
         </div>
 
         <div class="grid grid-cols-2 gap-3">

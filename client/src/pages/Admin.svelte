@@ -10,13 +10,15 @@
   let editingUser: any = null;
 
   let userForm = resetUserForm();
+  let employeeList: any[] = [];
 
   function resetUserForm() {
     return {
       username: "",
       displayName: "",
-      role: "readonly" as "super_admin" | "admin" | "pm" | "readonly",
+      role: "field_staff" as "super_admin" | "admin" | "pm" | "foreman" | "field_staff",
       password: "",
+      employeeId: null as number | null,
     };
   }
 
@@ -31,6 +33,7 @@
   let companyName = "";
   let companyShort = "";
   let companyLogo = "";
+  let autoDeductLunch = false;
   let settingsSaving = false;
   let settingsSaved = false;
   let logoUploading = false;
@@ -42,7 +45,7 @@
   $: isSuperAdmin = $user?.role === "super_admin";
 
   onMount(async () => {
-    const promises: Promise<any>[] = [loadUsers(), loadSettings(), loadGcCompanies(), loadSuppliers(), loadImportStatus()];
+    const promises: Promise<any>[] = [loadUsers(), loadSettings(), loadGcCompanies(), loadSuppliers(), loadImportStatus(), loadEmployees()];
     if ($user?.role === "super_admin") {
       promises.push(loadCompanies());
     }
@@ -53,6 +56,12 @@
     loadingUsers = true;
     users = await api.get("/users");
     loadingUsers = false;
+  }
+
+  async function loadEmployees() {
+    try {
+      employeeList = await api.get("/employees");
+    } catch { employeeList = []; }
   }
 
   async function loadCompanies() {
@@ -68,6 +77,7 @@
     companyName = s.companyName || "";
     companyShort = s.companyShort || "";
     companyLogo = s.companyLogo || "";
+    autoDeductLunch = s.autoDeductLunch === "true";
   }
 
   async function handleLogoUpload(e: Event) {
@@ -94,7 +104,7 @@
     settingsSaving = true;
     settingsSaved = false;
     try {
-      await api.put("/settings", { companyName, companyShort });
+      await api.put("/settings", { companyName, companyShort, autoDeductLunch: String(autoDeductLunch) });
       settingsSaved = true;
       setTimeout(() => (settingsSaved = false), 2000);
     } catch (e: any) {
@@ -116,6 +126,7 @@
       displayName: u.displayName,
       role: u.role,
       password: "",
+      employeeId: u.employeeId || null,
     };
     showUserModal = true;
   }
@@ -127,6 +138,7 @@
           username: userForm.username,
           displayName: userForm.displayName,
           role: userForm.role,
+          employeeId: userForm.employeeId || null,
           isActive: editingUser.isActive,
         });
       } else {
@@ -138,6 +150,7 @@
           username: userForm.username,
           displayName: userForm.displayName,
           role: userForm.role,
+          employeeId: userForm.employeeId || null,
           password: userForm.password,
         });
       }
@@ -321,105 +334,119 @@
   const roleLabels: Record<string, string> = {
     super_admin: "Super Admin — Full access, manage companies & system settings",
     admin: "Admin — Full access, manage users & finance data",
-    pm: "Project Manager — Add/edit jobs & employees",
-    readonly: "Read Only — View only",
+    pm: "Project Manager — Add/edit jobs, employees & approve time",
+    foreman: "Foreman — Crew management, daily reports, toolbox talks",
+    field_staff: "Field Staff — Clock in/out, view assignments & assets",
   };
 
   const roleBadgeClass: Record<string, string> = {
     super_admin: "badge-primary",
     admin: "badge-error",
     pm: "badge-warning",
+    foreman: "badge-info",
+    field_staff: "badge-success",
     readonly: "badge-info",
   };
 </script>
 
 <div class="space-y-8">
-  <!-- ═══ COMPANY SETTINGS (super_admin only editable) ═══ -->
+  <!-- ═══ COMPANY SETTINGS ═══ -->
   <div>
-    <h1 class="page-title mb-4">Company Settings</h1>
-    <div class="apple-panel p-6">
-      {#if isSuperAdmin}
-        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 max-w-lg">
-          <div class="form-control">
-            <label class="label" for="company-name">
-              <span class="label-text font-medium">Company Name</span>
-            </label>
-            <input
-              id="company-name"
-              type="text"
-              class="input input-bordered"
-              bind:value={companyName}
-              placeholder="e.g. Pueblo Electrics"
-            />
-            <label class="label">
-              <span class="label-text-alt text-base-content/50">Shown on login page and reports</span>
-            </label>
-          </div>
-          <div class="form-control">
-            <label class="label" for="company-short">
-              <span class="label-text font-medium">Short Name / Initials</span>
-            </label>
-            <input
-              id="company-short"
-              type="text"
-              class="input input-bordered"
-              bind:value={companyShort}
-              placeholder="e.g. PE"
-            />
-            <label class="label">
-              <span class="label-text-alt text-base-content/50">Optional abbreviation</span>
-            </label>
-          </div>
+    <h1 class="page-title mb-6">Settings</h1>
+
+    <div class="admin-settings-grid">
+      <!-- ── Branding Card ── -->
+      <div class="admin-card">
+        <div class="admin-card-header">
+          <svg class="admin-card-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg>
+          <h3 class="admin-card-title">Branding</h3>
         </div>
-        <!-- Logo Upload -->
-        <div class="mt-4 flex items-center gap-4">
+        <p class="admin-card-desc">Company identity shown on login, reports, and the mobile app.</p>
+
+        {#if isSuperAdmin}
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div class="form-control">
+              <label class="label py-1" for="company-name">
+                <span class="label-text font-medium text-sm">Company Name</span>
+              </label>
+              <input id="company-name" type="text" class="input input-sm input-bordered" bind:value={companyName} placeholder="e.g. Pueblo Electrics" />
+              <label class="label py-0.5"><span class="label-text-alt text-base-content/40 text-xs">Login page &amp; reports</span></label>
+            </div>
+            <div class="form-control">
+              <label class="label py-1" for="company-short">
+                <span class="label-text font-medium text-sm">Short Name / Initials</span>
+              </label>
+              <input id="company-short" type="text" class="input input-sm input-bordered" bind:value={companyShort} placeholder="e.g. PE" />
+              <label class="label py-0.5"><span class="label-text-alt text-base-content/40 text-xs">Optional abbreviation</span></label>
+            </div>
+          </div>
+        {:else}
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-2">
+            <div>
+              <span class="text-xs text-base-content/50 uppercase tracking-wide">Company Name</span>
+              <p class="font-medium mt-1 text-sm">{companyName || "—"}</p>
+            </div>
+            <div>
+              <span class="text-xs text-base-content/50 uppercase tracking-wide">Short Name</span>
+              <p class="font-medium mt-1 text-sm">{companyShort || "—"}</p>
+            </div>
+          </div>
+        {/if}
+
+        <div class="admin-logo-row">
           {#if companyLogo}
-            <img src={companyLogo} alt="Company Logo" class="h-12 max-w-[180px] object-contain border border-base-300 rounded p-1 bg-white" />
+            <img src={companyLogo} alt="Company Logo" class="admin-logo-preview" />
           {:else}
-            <div class="h-12 w-32 border border-dashed border-base-300 rounded flex items-center justify-center text-base-content/30 text-xs">No logo</div>
+            <div class="admin-logo-empty">No logo</div>
           {/if}
-          <label class="btn btn-sm btn-outline cursor-pointer">
+          <label class="btn btn-xs btn-outline cursor-pointer">
             {#if logoUploading}
               <span class="loading loading-spinner loading-xs"></span>
             {:else}
-              {companyLogo ? "Change Logo" : "Upload Logo"}
+              {companyLogo ? "Change" : "Upload"}
             {/if}
             <input type="file" accept="image/jpeg,image/png,image/webp,image/svg+xml" class="hidden" on:change={handleLogoUpload} disabled={logoUploading} />
           </label>
           <span class="text-xs text-base-content/40">Used on printed reports</span>
         </div>
 
-        <div class="mt-4">
-          <button class="btn btn-sm btn-primary" on:click={saveSettings} disabled={settingsSaving}>
-            {#if settingsSaving}
-              <span class="loading loading-spinner loading-xs"></span>
-            {/if}
-            Save Settings
-          </button>
-          {#if settingsSaved}
-            <span class="text-success text-sm ml-2">Saved!</span>
-          {/if}
-        </div>
-      {:else}
-        <!-- Non-super_admin sees read-only settings -->
-        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 max-w-lg">
-          <div>
-            <span class="text-xs text-base-content/50 uppercase tracking-wide">Company Name</span>
-            <p class="font-medium mt-1">{companyName || "—"}</p>
-          </div>
-          <div>
-            <span class="text-xs text-base-content/50 uppercase tracking-wide">Short Name</span>
-            <p class="font-medium mt-1">{companyShort || "—"}</p>
-          </div>
-        </div>
-        {#if companyLogo}
-          <div class="mt-4">
-            <img src={companyLogo} alt="Company Logo" class="h-12 max-w-[180px] object-contain border border-base-300 rounded p-1 bg-white" />
-          </div>
+        {#if !isSuperAdmin}
+          <p class="text-xs text-base-content/40 mt-3">Company name is managed by your super admin</p>
         {/if}
-        <p class="text-xs text-base-content/40 mt-4">Contact your super admin to change company settings</p>
-      {/if}
+      </div>
+
+      <!-- ── Timekeeping Card ── -->
+      <div class="admin-card">
+        <div class="admin-card-header">
+          <svg class="admin-card-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          <h3 class="admin-card-title">Timekeeping</h3>
+        </div>
+        <p class="admin-card-desc">Rules applied automatically when employees clock in and out.</p>
+
+        <label class="admin-toggle-row">
+          <input type="checkbox" class="toggle toggle-sm toggle-primary" bind:checked={autoDeductLunch} disabled={!isSuperAdmin} />
+          <div>
+            <span class="font-medium text-sm">Auto-Deduct 30-Min Lunch</span>
+            <p class="text-xs text-base-content/50 mt-0.5">Deduct 30 minutes from shifts over 5 hours if no break was logged</p>
+          </div>
+        </label>
+      </div>
     </div>
+
+    <!-- Save bar -->
+    {#if isSuperAdmin}
+      <div class="admin-save-bar">
+        <button class="btn btn-sm btn-primary" on:click={saveSettings} disabled={settingsSaving}>
+          {#if settingsSaving}
+            <span class="loading loading-spinner loading-xs"></span>
+          {/if}
+          Save Settings
+        </button>
+        {#if settingsSaved}
+          <span class="admin-saved-badge">Saved!</span>
+        {/if}
+      </div>
+    {/if}
   </div>
 
   <!-- ═══ IMPORT OPPORTUNITIES (super_admin only) ═══ -->
@@ -580,6 +607,7 @@
             <tr>
               <th>Username</th>
               <th>Display Name</th>
+              <th>Linked Employee</th>
               <th>Role</th>
               <th>Status</th>
               <th>Last Login</th>
@@ -591,6 +619,16 @@
               <tr class="hover" class:opacity-50={!u.isActive}>
                 <td class="font-mono text-sm">{u.username}</td>
                 <td class="font-medium">{u.displayName}</td>
+                <td class="text-sm">
+                  {#if u.employeeName}
+                    <span class="flex items-center gap-1">
+                      <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 text-success" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101" /><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.172 13.828a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.102 1.101" /></svg>
+                      {u.employeeName}
+                    </span>
+                  {:else}
+                    <span class="text-base-content/30">—</span>
+                  {/if}
+                </td>
                 <td>
                   <span class="badge badge-sm {roleBadgeClass[u.role] || 'badge-ghost'}">{u.role.replace("_", " ")}</span>
                 </td>
@@ -668,10 +706,25 @@
             {/if}
             <option value="admin">Admin</option>
             <option value="pm">Project Manager</option>
-            <option value="readonly">Read Only</option>
+            <option value="foreman">Foreman</option>
+            <option value="field_staff">Field Staff</option>
           </select>
           <label class="label">
             <span class="label-text-alt text-base-content/50">{roleLabels[userForm.role] || ""}</span>
+          </label>
+        </div>
+        <div class="form-control">
+          <label class="label label-text text-xs" for="u-employee">Link to Employee</label>
+          <select id="u-employee" class="select select-sm select-bordered"
+            value={userForm.employeeId ?? ''}
+            on:change={(e) => { const v = e.currentTarget.value; userForm.employeeId = v ? parseInt(v) : null; }}>
+            <option value="">— No linked employee —</option>
+            {#each employeeList.filter(e => e.status === 'active') as emp}
+              <option value={emp.id}>{emp.firstName} {emp.lastName}{emp.classificationName ? ` (${emp.classificationName})` : ''}</option>
+            {/each}
+          </select>
+          <label class="label">
+            <span class="label-text-alt text-base-content/50">Links this login to an employee record for mobile access & identity</span>
           </label>
         </div>
         {#if !editingUser}
@@ -783,3 +836,103 @@
 {/if}
 
 <!-- GC Company and Supplier modals removed — use dedicated pages -->
+
+<style>
+  .admin-settings-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+    gap: 16px;
+    margin-bottom: 16px;
+  }
+  .admin-card {
+    background: white;
+    border: 1px solid hsl(var(--b3, 0 0% 90%));
+    border-radius: 12px;
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .admin-card-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .admin-card-icon {
+    width: 20px;
+    height: 20px;
+    color: #f97316;
+    flex-shrink: 0;
+  }
+  .admin-card-title {
+    font-size: 0.9375rem;
+    font-weight: 700;
+    color: hsl(var(--bc, 0 0% 10%));
+    margin: 0;
+  }
+  .admin-card-desc {
+    font-size: 0.75rem;
+    color: hsl(var(--bc, 0 0% 10%) / 0.5);
+    margin: -4px 0 4px;
+    line-height: 1.4;
+  }
+  .admin-logo-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 4px;
+  }
+  .admin-logo-preview {
+    height: 40px;
+    max-width: 140px;
+    object-fit: contain;
+    border: 1px solid hsl(var(--b3, 0 0% 90%));
+    border-radius: 6px;
+    padding: 3px;
+    background: white;
+  }
+  .admin-logo-empty {
+    height: 40px;
+    width: 100px;
+    border: 1px dashed hsl(var(--b3, 0 0% 90%));
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: hsl(var(--bc, 0 0% 10%) / 0.25);
+    font-size: 0.6875rem;
+  }
+  .admin-toggle-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    cursor: pointer;
+    padding: 10px 12px;
+    border-radius: 8px;
+    background: hsl(var(--b2, 0 0% 97%));
+    transition: background 0.15s;
+  }
+  .admin-toggle-row:hover {
+    background: hsl(var(--b3, 0 0% 93%));
+  }
+  .admin-save-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding-top: 4px;
+  }
+  .admin-saved-badge {
+    font-size: 0.8125rem;
+    font-weight: 600;
+    color: #16a34a;
+    background: #f0fdf4;
+    border: 1px solid #bbf7d0;
+    border-radius: 100px;
+    padding: 2px 10px;
+    animation: admin-fade-in 0.2s ease;
+  }
+  @keyframes admin-fade-in {
+    from { opacity: 0; transform: translateY(-4px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+</style>

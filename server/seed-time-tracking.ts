@@ -61,6 +61,13 @@ seedTimeTrackingRoutes.post("/time-tracking", requireRole("super_admin"), async 
     return arr[Math.floor(Math.random() * arr.length)];
   }
 
+  // UTC offset for seed times — server runs in UTC, but we want clock-in/out
+  // times to look correct in the user's local timezone. This offset converts
+  // "local hour" to UTC. E.g. 6 = UTC-6 (MDT) means 6 AM local → 12 PM UTC.
+  // In production, real clock-ins capture actual UTC from the device, so this
+  // only matters for seed data. Reads from SEED_TZ_OFFSET env or defaults to 6 (MDT).
+  const tzOffset = parseInt(process.env.SEED_TZ_OFFSET || "6", 10);
+
   // Generate 2 weeks of data (past 14 days)
   const today = new Date();
   const entries: any[] = [];
@@ -84,8 +91,8 @@ seedTimeTrackingRoutes.post("/time-tracking", requireRole("super_admin"), async 
       const job = randomItem(jobs);
       const source = randomItem(sources);
 
-      // Clock in between 5:30 AM and 7:30 AM
-      const clockInHour = 5 + Math.floor(Math.random() * 2);
+      // Clock in between 5:30 AM and 7:30 AM local time
+      const clockInHour = 5 + Math.floor(Math.random() * 2) + tzOffset;
       const clockInMin = Math.floor(Math.random() * 60);
       const clockIn = new Date(date);
       clockIn.setHours(clockInHour, clockInMin, Math.floor(Math.random() * 60));
@@ -158,6 +165,190 @@ seedTimeTrackingRoutes.post("/time-tracking", requireRole("super_admin"), async 
     }
   }
 
+  // ── Guarantee Trevor Terra has a full week of data ──────────
+  const trevorTerra = employees.find(
+    (e: any) => e.first_name === "Trevor" && e.last_name === "Terra"
+  );
+  if (trevorTerra) {
+    // Get Monday of this week
+    const dow = today.getDay();
+    const monday = new Date(today);
+    monday.setDate(today.getDate() - ((dow + 6) % 7));
+
+    // Also seed last week (Mon-Fri) so weekly hours look realistic even early in the week
+    const lastMonday = new Date(monday);
+    lastMonday.setDate(monday.getDate() - 7);
+
+    const trevorDays: { date: Date; dateStr: string }[] = [];
+    // Last week Mon-Fri
+    for (let i = 0; i < 5; i++) {
+      const d = new Date(lastMonday);
+      d.setDate(lastMonday.getDate() + i);
+      if (d < today) trevorDays.push({ date: d, dateStr: d.toISOString().split("T")[0] });
+    }
+    // This week Mon-Fri (up to yesterday)
+    for (let i = 0; i < 5; i++) {
+      const d = new Date(monday);
+      d.setDate(monday.getDate() + i);
+      const ds = d.toISOString().split("T")[0];
+      if (d < today && d.getDay() !== 0 && d.getDay() !== 6) {
+        trevorDays.push({ date: d, dateStr: ds });
+      }
+    }
+
+    for (const { date, dateStr } of trevorDays) {
+      const job = randomItem(jobs);
+      // Trevor clocks in 6:00-6:30 AM local, works 9-10.5 hours
+      const clockInHour = 6 + tzOffset;
+      const clockInMin = Math.floor(Math.random() * 30);
+      const clockIn = new Date(date);
+      clockIn.setHours(clockInHour, clockInMin, Math.floor(Math.random() * 60));
+
+      const workHours = 9 + Math.random() * 1.5;
+      const clockOut = new Date(clockIn.getTime() + workHours * 3600000);
+
+      const jobLat = job.latitude || puebloCenter.lat;
+      const jobLng = job.longitude || puebloCenter.lng;
+
+      const breakMins = 30;
+      const netHours = workHours - 0.5;
+      const regular = Math.min(netHours, 8);
+      const overtime = Math.min(Math.max(netHours - 8, 0), 4);
+      const double = Math.max(netHours - 12, 0);
+
+      const lunchOut = new Date(clockIn.getTime() + 4 * 3600000);
+      const lunchIn = new Date(lunchOut.getTime() + breakMins * 60000);
+
+      sqlite.run(`
+        INSERT INTO time_entries (
+          company_id, job_id, employee_id, report_date,
+          hours_regular, hours_overtime, hours_double,
+          clock_in, clock_out,
+          clock_in_lat, clock_in_lng, clock_out_lat, clock_out_lng,
+          clock_in_inside_geofence, clock_out_inside_geofence,
+          clock_in_address, clock_out_address,
+          source, break_minutes, lunch_out, lunch_in,
+          work_performed, notes, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?, 'mobile', ?, ?, ?, ?, ?, ?, ?)
+      `, [
+        companyId, job.id, trevorTerra.id, dateStr,
+        Math.round(regular * 100) / 100,
+        Math.round(overtime * 100) / 100,
+        Math.round(double * 100) / 100,
+        clockIn.toISOString(), clockOut.toISOString(),
+        jitter(jobLat, 0.001), jitter(jobLng, 0.001),
+        jitter(jobLat, 0.001), jitter(jobLng, 0.001),
+        job.address || "Pueblo, CO", job.address || "Pueblo, CO",
+        breakMins,
+        lunchOut.toISOString(), lunchIn.toISOString(),
+        randomItem(workDescriptions),
+        null,
+        clockIn.toISOString(), clockOut.toISOString(),
+      ]);
+      entryCount++;
+    }
+  }
+
+  // ── Split-shift days: multiple clock in/out per day ─────────
+  // Trevor + 2 other employees get a few days where they clock out
+  // for lunch and clock back in on a different job in the afternoon.
+  const splitCandidates = [trevorTerra, employees[1], employees[2]].filter(Boolean);
+  let splitCount = 0;
+
+  for (const emp of splitCandidates) {
+    if (!emp) continue;
+
+    // Pick 2-3 recent weekdays for split shifts
+    const numSplitDays = emp === trevorTerra ? 3 : 2;
+    let splitsAdded = 0;
+
+    for (let dayOffset = 2; dayOffset <= 8 && splitsAdded < numSplitDays; dayOffset++) {
+      const d = new Date(today);
+      d.setDate(today.getDate() - dayOffset);
+      if (d.getDay() === 0 || d.getDay() === 6) continue;
+      const dateStr = d.toISOString().split("T")[0];
+
+      // Delete any existing single entry for this emp+date (we'll replace with split)
+      sqlite.run(
+        `DELETE FROM time_entries WHERE company_id = ? AND employee_id = ? AND report_date = ? AND source IN ('mobile','tablet')`,
+        [companyId, emp.id, dateStr]
+      );
+
+      // Pick two different jobs
+      const job1 = jobs[splitsAdded % jobs.length];
+      const job2 = jobs[(splitsAdded + 1) % jobs.length];
+      const job1Lat = job1.latitude || puebloCenter.lat;
+      const job1Lng = job1.longitude || puebloCenter.lng;
+      const job2Lat = job2.latitude || puebloCenter.lat;
+      const job2Lng = job2.longitude || puebloCenter.lng;
+
+      // Morning shift: 6:00 AM → 11:30 AM local (5.5 hrs, no break)
+      const amIn = new Date(d);
+      amIn.setHours(6 + tzOffset, Math.floor(Math.random() * 15), 0);
+      const amOut = new Date(d);
+      amOut.setHours(11 + tzOffset, 30 + Math.floor(Math.random() * 15), 0);
+      const amHrs = (amOut.getTime() - amIn.getTime()) / 3600000;
+
+      sqlite.run(`
+        INSERT INTO time_entries (
+          company_id, job_id, employee_id, report_date,
+          hours_regular, hours_overtime, hours_double,
+          clock_in, clock_out,
+          clock_in_lat, clock_in_lng, clock_out_lat, clock_out_lng,
+          clock_in_inside_geofence, clock_out_inside_geofence,
+          clock_in_address, clock_out_address,
+          source, break_minutes, work_performed, notes, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?, 'mobile', 0, ?, ?, ?, ?)
+      `, [
+        companyId, job1.id, emp.id, dateStr,
+        Math.round(amHrs * 100) / 100,
+        amIn.toISOString(), amOut.toISOString(),
+        jitter(job1Lat, 0.001), jitter(job1Lng, 0.001),
+        jitter(job1Lat, 0.001), jitter(job1Lng, 0.001),
+        job1.address || "Pueblo, CO", job1.address || "Pueblo, CO",
+        randomItem(workDescriptions),
+        "Morning shift",
+        amIn.toISOString(), amOut.toISOString(),
+      ]);
+
+      // Afternoon shift: 12:00 PM → 3:30-4:30 PM local (different job)
+      const pmIn = new Date(d);
+      pmIn.setHours(12 + tzOffset, Math.floor(Math.random() * 15), 0);
+      const pmHrs = 3.5 + Math.random();
+      const pmOut = new Date(pmIn.getTime() + pmHrs * 3600000);
+      const totalDay = amHrs + pmHrs;
+      const pmReg = Math.min(pmHrs, Math.max(8 - amHrs, 0));
+      const pmOT = Math.min(Math.max(totalDay - 8, 0), 4) - Math.max(Math.min(amHrs - 8, 4), 0);
+
+      sqlite.run(`
+        INSERT INTO time_entries (
+          company_id, job_id, employee_id, report_date,
+          hours_regular, hours_overtime, hours_double,
+          clock_in, clock_out,
+          clock_in_lat, clock_in_lng, clock_out_lat, clock_out_lng,
+          clock_in_inside_geofence, clock_out_inside_geofence,
+          clock_in_address, clock_out_address,
+          source, break_minutes, work_performed, notes, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?, 'mobile', 0, ?, ?, ?, ?)
+      `, [
+        companyId, job2.id, emp.id, dateStr,
+        Math.round(Math.max(pmReg, 0) * 100) / 100,
+        Math.round(Math.max(pmOT, 0) * 100) / 100,
+        pmIn.toISOString(), pmOut.toISOString(),
+        jitter(job2Lat, 0.001), jitter(job2Lng, 0.001),
+        jitter(job2Lat, 0.001), jitter(job2Lng, 0.001),
+        job2.address || "Pueblo, CO", job2.address || "Pueblo, CO",
+        randomItem(workDescriptions),
+        "Afternoon — moved to different job",
+        pmIn.toISOString(), pmOut.toISOString(),
+      ]);
+
+      splitCount += 2;
+      splitsAdded++;
+    }
+  }
+  entryCount += splitCount;
+
   // Seed a few "currently clocked in" entries for today (no clock_out)
   const todayStr = today.toISOString().split("T")[0];
   const activeWorkers = employees.slice(0, Math.min(3, employees.length));
@@ -166,7 +357,7 @@ seedTimeTrackingRoutes.post("/time-tracking", requireRole("super_admin"), async 
   for (const emp of activeWorkers) {
     const job = randomItem(jobs);
     const clockIn = new Date(today);
-    clockIn.setHours(6 + Math.floor(Math.random() * 2), Math.floor(Math.random() * 60), 0);
+    clockIn.setHours(6 + tzOffset + Math.floor(Math.random() * 2), Math.floor(Math.random() * 60), 0);
 
     // Only create if clock-in is in the past
     if (clockIn > today) continue;
@@ -216,6 +407,7 @@ seedTimeTrackingRoutes.post("/time-tracking", requireRole("super_admin"), async 
     success: true,
     seeded: {
       timeEntries: entryCount,
+      splitShiftEntries: splitCount,
       activeClockIns: activeCount,
       liveLocations: activeCount,
       employees: employees.length,

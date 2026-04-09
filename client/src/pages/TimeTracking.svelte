@@ -1,6 +1,12 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { api } from "../lib/api";
+  import { user } from "../lib/stores";
+  import ClockIssues from "../components/ClockIssues.svelte";
+  import TimeOffRequests from "../components/TimeOffRequests.svelte";
+
+  let activeTab: "grid" | "issues" | "requests" = "grid";
+  $: canAddManual = (() => { const u = $user; return u && (u.role === "super_admin" || u.role === "admin" || u.role === "pm"); })();
 
   let entries: any[] = [];
   let employees: any[] = [];
@@ -19,6 +25,7 @@
   // Detail modal
   let detail: any = null;
   let detailLoading = false;
+  let expandedPhoto: string | null = null;
   let adjustments: any[] = [];
 
   // Adjust modal
@@ -33,6 +40,13 @@
   let crewModalTitle = "";
   let crewModalList: any[] = [];
 
+  // Manual entry modal
+  let manualOpen = false;
+  let manualForm = { employeeId: "", jobId: "", reportDate: "", clockIn: "", clockOut: "", hoursRegular: 0, hoursOvertime: 0, hoursDouble: 0, breakMinutes: 0, workPerformed: "", notes: "" };
+  let manualSaving = false;
+  let manualError = "";
+  let manualWarn = "";
+
   // ── Date helpers ───────────────────────────────────────
   function getMonday() {
     const d = new Date(); const day = d.getDay();
@@ -44,8 +58,8 @@
     d.setDate(d.getDate() - day + (day === 0 ? 0 : 7));
     return d.toISOString().split("T")[0];
   }
-  function getWeekDates(): string[] {
-    const dates: string[] = []; const d = new Date(dateFrom + "T00:00:00");
+  function getWeekDates(from: string): string[] {
+    const dates: string[] = []; const d = new Date(from + "T00:00:00");
     for (let i = 0; i < 7; i++) { dates.push(d.toISOString().split("T")[0]); d.setDate(d.getDate() + 1); }
     return dates;
   }
@@ -64,20 +78,47 @@
     const issues: string[] = [];
     if (!e.clock_in) issues.push("Missing clock-in");
     if (!e.clock_out) issues.push("Missing clock-out");
-    if (e.clock_in_inside_geofence === 0) issues.push("Clock-in outside geofence");
-    if (e.clock_out_inside_geofence === 0) issues.push("Clock-out outside geofence");
-    if (totalH(e) >= 6 && (e.break_minutes || 0) === 0) issues.push("No break on 6+ hr shift");
+    // Skip geofence issues if already approved by management
+    if (!e.geofence_approved_by) {
+      if (e.clock_in_inside_geofence === 0) issues.push("Clock-in outside geofence");
+      if (e.clock_out_inside_geofence === 0) issues.push("Clock-out outside geofence");
+    }
+    if (totalH(e) >= 5 && (e.break_minutes || 0) === 0) issues.push("No break on 5+ hr shift");
     if (totalH(e) > 16) issues.push("Excessive hours (16+)");
     return issues;
   }
 
-  function cellStatus(dayEntries: any[]): "green" | "yellow" | "red" | "" {
+  // Check if entry has employee response awaiting management action
+  // issue_statuses format: "noted:missed_clock_out|pending:outside_geofence"
+  function hasEmployeeResponse(e: any): boolean {
+    if (e.pending_corrections > 0) return true;
+    if (!e.issue_statuses) return false;
+    const parts = (e.issue_statuses as string).split("|");
+    return parts.some(p => p.startsWith("noted:"));
+  }
+
+  // Check if ALL issues on an entry are resolved (approved)
+  function allIssuesResolved(e: any): boolean {
+    if (!e.issue_statuses) return false;
+    const parts = (e.issue_statuses as string).split("|");
+    return parts.length > 0 && parts.every(p => p.startsWith("approved:"));
+  }
+
+  function cellStatus(dayEntries: any[]): "green" | "blue" | "orange" | "red" | "" {
     if (!dayEntries?.length) return "";
-    let worst: "green" | "yellow" | "red" = "green";
+    let worst: "green" | "blue" | "orange" | "red" = "green";
     for (const e of dayEntries) {
       const issues = getIssues(e);
-      if (issues.some(i => i.includes("Missing"))) return "red";
-      if (issues.length > 0) worst = "yellow";
+      if (issues.length === 0) continue;
+      if (allIssuesResolved(e)) continue; // resolved issues don't count
+      if (hasEmployeeResponse(e)) {
+        // Employee responded — needs management action (blue)
+        if (worst === "green") worst = "blue";
+      } else if (issues.some(i => i.includes("Missing"))) {
+        return "red";
+      } else {
+        if (worst !== "red") worst = "orange";
+      }
     }
     return worst;
   }
@@ -89,6 +130,37 @@
     for (const e of dayEntries) { for (const i of getIssues(e)) { if (!all.includes(i)) all.push(i); } }
     return all;
   }
+  // Group day entries by job for consolidated cards
+  interface JobGroup {
+    jobId: number;
+    jobNumber: string;
+    jobName: string;
+    entries: any[];
+    totalHours: number;
+    otHours: number;
+    issues: string[];
+    worstStatus: "red" | "orange" | "blue" | "clean";
+  }
+  function groupByJob(dayEntries: any[]): JobGroup[] {
+    const m = new Map<number, JobGroup>();
+    for (const e of dayEntries) {
+      const jid = e.job_id || 0;
+      if (!m.has(jid)) m.set(jid, { jobId: jid, jobNumber: e.job_number || "", jobName: e.job_name || "", entries: [], totalHours: 0, otHours: 0, issues: [], worstStatus: "clean" });
+      const g = m.get(jid)!;
+      g.entries.push(e);
+      g.totalHours += totalH(e);
+      g.otHours += e.hours_overtime || 0;
+      const ei = getIssues(e);
+      for (const i of ei) { if (!g.issues.includes(i)) g.issues.push(i); }
+      if (allIssuesResolved(e)) { /* skip — resolved */ }
+      else if (hasEmployeeResponse(e) && ei.length > 0) {
+        if (g.worstStatus === "clean") g.worstStatus = "blue";
+      } else if (ei.some(i => i.includes("Missing"))) g.worstStatus = "red";
+      else if (ei.length > 0 && g.worstStatus !== "red") g.worstStatus = "orange";
+    }
+    return Array.from(m.values());
+  }
+
   function rowIssueList(row: Row): string[] {
     const all: string[] = [];
     for (const d of Object.values(row.days)) { for (const e of d) { for (const i of getIssues(e)) { if (!all.includes(i)) all.push(i); } } }
@@ -126,13 +198,13 @@
   function goThisWeek() { dateFrom = getMonday(); dateTo = getSunday(); loadEntries(); }
 
   // ── Grid data ──────────────────────────────────────────
-  interface Row { id: number; name: string; days: Record<string, any[]>; reg: number; ot: number; dt: number; total: number; issues: number; issueList: string[]; hasRedIssue: boolean; }
+  interface Row { id: number; name: string; days: Record<string, any[]>; reg: number; ot: number; dt: number; total: number; issues: number; issueList: string[]; hasRedIssue: boolean; hasBlueIssue: boolean; }
 
-  $: weekDates = getWeekDates();
+  $: weekDates = getWeekDates(dateFrom);
   $: rows = (() => {
     const m = new Map<number, Row>();
     for (const e of entries) {
-      if (!m.has(e.employee_id)) m.set(e.employee_id, { id: e.employee_id, name: `${e.first_name||""} ${e.last_name||""}`.trim(), days: {}, reg: 0, ot: 0, dt: 0, total: 0, issues: 0, issueList: [], hasRedIssue: false });
+      if (!m.has(e.employee_id)) m.set(e.employee_id, { id: e.employee_id, name: `${e.first_name||""} ${e.last_name||""}`.trim(), days: {}, reg: 0, ot: 0, dt: 0, total: 0, issues: 0, issueList: [], hasRedIssue: false, hasBlueIssue: false });
       const r = m.get(e.employee_id)!;
       if (!r.days[e.report_date]) r.days[e.report_date] = [];
       r.days[e.report_date].push(e);
@@ -143,6 +215,7 @@
       const ei = getIssues(e);
       r.issues += ei.length;
       for (const i of ei) { if (!r.issueList.includes(i)) r.issueList.push(i); if (i.includes("Missing")) r.hasRedIssue = true; }
+      if (hasEmployeeResponse(e) && ei.length > 0) r.hasBlueIssue = true;
     }
     return Array.from(m.values()).sort((a, b) => a.name.localeCompare(b.name));
   })();
@@ -182,7 +255,7 @@
       adjustments = adjRes?.adjustments || [];
     } catch (e: any) { error = e.message; } finally { detailLoading = false; }
   }
-  function closeDetail() { detail = null; adjustMode = false; }
+  function closeDetail() { detail = null; adjustMode = false; expandedPhoto = null; }
 
   // Convert ISO string to datetime-local format (YYYY-MM-DDTHH:MM)
   function toLocalInput(iso: string | null): string {
@@ -272,6 +345,18 @@
     } catch (e: any) { adjustError = e.message; } finally { adjustSaving = false; }
   }
 
+  // ── Approve geofence ───────────────────────────────────
+  let approvingGeo = false;
+  async function approveGeofence() {
+    if (!detail) return;
+    approvingGeo = true;
+    try {
+      await api.post(`/time-tracking/entries/${detail.id}/approve-geofence`, {});
+      await openDetail(detail.id); // refresh detail
+      await loadEntries(); // refresh grid
+    } catch (e: any) { error = e.message; } finally { approvingGeo = false; }
+  }
+
   // No-activity employees: active employees not in this week's entries
   $: noActivity = (() => {
     const activeIds = new Set(entries.map((e: any) => e.employee_id));
@@ -305,13 +390,95 @@
     return `${e.firstName || e.first_name || ""} ${e.lastName || e.last_name || ""}`.trim();
   }
 
+  // ── Manual entry ────────────────────────────────────────
+  function openManualEntry(preEmployeeId?: number, preDate?: string) {
+    manualForm = {
+      employeeId: preEmployeeId ? String(preEmployeeId) : "",
+      jobId: "",
+      reportDate: preDate || new Date().toISOString().split("T")[0],
+      clockIn: "",
+      clockOut: "",
+      hoursRegular: 0, hoursOvertime: 0, hoursDouble: 0,
+      breakMinutes: 0, workPerformed: "", notes: ""
+    };
+    manualError = "";
+    manualWarn = "";
+    manualOpen = true;
+  }
+  function closeManualEntry() { manualOpen = false; }
+
+  function manualRecalcHours() {
+    manualWarn = "";
+    if (!manualForm.clockIn || !manualForm.clockOut) return;
+    const inTime = new Date(manualForm.clockIn).getTime();
+    const outTime = new Date(manualForm.clockOut).getTime();
+    if (isNaN(inTime) || isNaN(outTime)) return;
+    if (outTime <= inTime) {
+      manualWarn = "Clock out must be after clock in";
+      manualForm.hoursRegular = 0; manualForm.hoursOvertime = 0; manualForm.hoursDouble = 0;
+      return;
+    }
+    const totalMin = (outTime - inTime) / 60000 - (manualForm.breakMinutes || 0);
+    if (totalMin <= 0) { manualForm.hoursRegular = 0; manualForm.hoursOvertime = 0; manualForm.hoursDouble = 0; return; }
+    const totalHrs = totalMin / 60;
+    if (totalHrs > 16) manualWarn = `Entry spans ${totalHrs.toFixed(1)} hours — are you sure?`;
+    else if (totalHrs > 12) manualWarn = `Entry spans ${totalHrs.toFixed(1)} hours — double time will apply.`;
+    if (totalHrs <= 8) {
+      manualForm.hoursRegular = Math.round(totalHrs * 100) / 100; manualForm.hoursOvertime = 0; manualForm.hoursDouble = 0;
+    } else if (totalHrs <= 12) {
+      manualForm.hoursRegular = 8; manualForm.hoursOvertime = Math.round((totalHrs - 8) * 100) / 100; manualForm.hoursDouble = 0;
+    } else {
+      manualForm.hoursRegular = 8; manualForm.hoursOvertime = 4; manualForm.hoursDouble = Math.round((totalHrs - 12) * 100) / 100;
+    }
+  }
+
+  async function saveManualEntry() {
+    manualError = "";
+    if (!manualForm.employeeId) { manualError = "Select an employee"; return; }
+    if (!manualForm.jobId) { manualError = "Select a job"; return; }
+    if (!manualForm.reportDate) { manualError = "Select a date"; return; }
+    if (!manualForm.clockIn && !manualForm.clockOut && manualForm.hoursRegular === 0) {
+      manualError = "Enter clock times or hours"; return;
+    }
+    if (manualForm.clockIn && manualForm.clockOut) {
+      const inT = new Date(manualForm.clockIn).getTime();
+      const outT = new Date(manualForm.clockOut).getTime();
+      if (outT <= inT) { manualError = "Clock out must be after clock in"; return; }
+    }
+    manualSaving = true;
+    try {
+      await api.post("/time-tracking/entries", {
+        employeeId: Number(manualForm.employeeId),
+        jobId: Number(manualForm.jobId),
+        reportDate: manualForm.reportDate,
+        startTime: manualForm.clockIn || null,
+        endTime: manualForm.clockOut || null,
+        hoursRegular: manualForm.hoursRegular,
+        hoursOvertime: manualForm.hoursOvertime,
+        hoursDouble: manualForm.hoursDouble,
+        breakMinutes: manualForm.breakMinutes,
+        workPerformed: manualForm.workPerformed || null,
+        notes: manualForm.notes || null,
+      });
+      manualOpen = false;
+      await loadEntries();
+    } catch (e: any) { manualError = e.message; } finally { manualSaving = false; }
+  }
+
   onMount(() => { loadFilters(); loadEntries(); });
 </script>
 
 <div class="te">
   <!-- Header -->
   <div class="te-header">
-    <h1 class="te-h1">Time Entries</h1>
+    <div style="display:flex; align-items:center; gap:16px;">
+      <h1 class="te-h1">Time Entries</h1>
+      <div class="te-tabs">
+        <button class="te-tab" class:te-tab-active={activeTab === "grid"} on:click={() => activeTab = "grid"}>Grid View</button>
+        <button class="te-tab" class:te-tab-active={activeTab === "issues"} on:click={() => activeTab = "issues"}>Clock Issues</button>
+        <button class="te-tab" class:te-tab-active={activeTab === "requests"} on:click={() => activeTab = "requests"}>Requests</button>
+      </div>
+    </div>
     <div class="te-nav">
       <button class="te-nav-btn" on:click={() => shiftWeek(-1)}>‹</button>
       <span class="te-nav-label">{fmtDay(dateFrom)} {fmtDayNum(dateFrom)} — {fmtDay(dateTo)} {fmtDayNum(dateTo)}</span>
@@ -320,6 +487,11 @@
     </div>
   </div>
 
+  {#if activeTab === "issues"}
+    <ClockIssues />
+  {:else if activeTab === "requests"}
+    <TimeOffRequests />
+  {:else}
   <!-- Dashboard Cards -->
   <div class="te-cards">
     <!-- Crew This Week -->
@@ -349,7 +521,7 @@
         <div class="te-card-lbl">No Activity</div>
         <div class="te-avatar-stack">
           {#each noActivity.slice(0, 4) as e, i}
-            <span class="te-avatar te-avatar-gray" style="z-index:{4-i};" title={getFullName(e)}>{getInitials(e)}</span>
+            <span class="te-avatar" style="z-index:{4-i};" title={getFullName(e)}>{getInitials(e)}</span>
           {/each}
           {#if noActivity.length > 4}<span class="te-avatar te-avatar-more" style="z-index:0;">+{noActivity.length - 4}</span>{/if}
         </div>
@@ -436,6 +608,12 @@
       <input type="checkbox" class="checkbox checkbox-xs checkbox-error" bind:checked={filterFlagged} on:change={loadEntries} />
       <span>Flagged Only</span>
     </label>
+    {#if canAddManual}
+      <button class="te-add-record-btn" on:click={() => openManualEntry()}>
+        <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="3" x2="8" y2="13"/><line x1="3" y1="8" x2="13" y2="8"/></svg>
+        Add Record
+      </button>
+    {/if}
   </div>
 
   {#if error}<div class="te-error">{error}</div>{/if}
@@ -454,12 +632,12 @@
       </div>
       {#each rows as row (row.id)}
         <div class="te-grid-row">
-          <div class="te-g-emp te-emp" class:te-emp-glow-red={row.hasRedIssue} class:te-emp-glow-yellow={row.issues > 0 && !row.hasRedIssue}>
+          <div class="te-g-emp te-emp" class:te-emp-glow-red={row.hasRedIssue && !row.hasBlueIssue} class:te-emp-glow-orange={row.issues > 0 && !row.hasRedIssue && !row.hasBlueIssue} class:te-emp-glow-blue={row.hasBlueIssue}>
             <span class="te-emp-name">{row.name}</span>
             {#if row.issues > 0}
-              <span class="te-issue-pill" class:te-issue-pill-red={row.hasRedIssue} class:te-issue-pill-yellow={!row.hasRedIssue}>
+              <span class="te-issue-pill" class:te-issue-pill-red={row.hasRedIssue && !row.hasBlueIssue} class:te-issue-pill-orange={!row.hasRedIssue && !row.hasBlueIssue} class:te-issue-pill-blue={row.hasBlueIssue}>
                 {row.issues}
-                <span class="te-tooltip">{row.issueList.join(" · ")}</span>
+                <span class="te-tooltip">{row.hasBlueIssue ? "Employee responded — needs review · " : ""}{row.issueList.join(" · ")}</span>
               </span>
             {/if}
           </div>
@@ -468,31 +646,43 @@
             {@const st = cellStatus(de)}
             {@const hrs = cellHours(de)}
             {@const dayIssues = cellIssueList(de)}
-            <div class="te-g-day te-g-day-cell">
+            <!-- svelte-ignore a11y-click-events-have-key-events -->
+            <!-- svelte-ignore a11y-no-static-element-interactions -->
+            <div class="te-g-day te-g-day-cell" class:te-g-day-empty={de.length === 0 && canAddManual} on:click={() => { if (de.length === 0 && canAddManual) openManualEntry(row.id, d); }}>
+              {#if de.length === 0 && canAddManual}
+                <div class="te-empty-plus" title="Add time record">+</div>
+              {/if}
               {#if de.length > 0}
-                <button class="te-cell" class:te-cell-red={st==="red"} class:te-cell-yellow={st==="yellow"} on:click={() => openDetail(de[0].id)}>
-                  <div class="te-cell-r1">
-                    <span class="te-cell-h">{hrs.toFixed(1)}</span>
-                    {#if st === "green"}
-                      <span class="te-status-chip te-chip-green">
-                        <svg viewBox="0 0 18 18" width="13" height="13" fill="none"><path d="M4.5 9.5l3 3 6-6" stroke="#15803d" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-                      </span>
-                    {:else if st === "yellow"}
-                      <span class="te-status-chip te-chip-yellow te-has-tip">
-                        <svg viewBox="0 0 18 18" width="13" height="13" fill="none"><circle cx="9" cy="9" r="7" stroke="#b45309" stroke-width="1.5"/><line x1="9" y1="5.5" x2="9" y2="9.5" stroke="#b45309" stroke-width="1.8" stroke-linecap="round"/><circle cx="9" cy="12.5" r="1" fill="#b45309"/></svg>
-                        <span class="te-tooltip">{dayIssues.join(" · ")}</span>
-                      </span>
-                    {:else if st === "red"}
-                      <span class="te-status-chip te-chip-red te-has-tip">
-                        <svg viewBox="0 0 18 18" width="13" height="13" fill="none"><circle cx="9" cy="9" r="7" stroke="#dc2626" stroke-width="1.5"/><path d="M6.5 6.5l5 5M11.5 6.5l-5 5" stroke="#dc2626" stroke-width="1.8" stroke-linecap="round"/></svg>
-                        <span class="te-tooltip">{dayIssues.join(" · ")}</span>
-                      </span>
-                    {/if}
+                {@const jobGroups = groupByJob(de)}
+                <!-- Day total -->
+                <div class="te-cell-day-head">
+                  <span class="te-cell-h">{hrs.toFixed(1)}</span>
+                </div>
+                <!-- Consolidated job cards -->
+                {#each jobGroups as jg}
+                  <div class="te-cell te-cell-entry" class:te-cell-red={jg.worstStatus==="red"} class:te-cell-orange={jg.worstStatus==="orange"} class:te-cell-blue={jg.worstStatus==="blue"}>
+                    <div class="te-cell-job-row">
+                      <span class="te-cell-job">{jg.jobNumber} {jg.jobName}</span>
+                    </div>
+                    {#each jg.entries as entry}
+                      {@const ei = getIssues(entry)}
+                      {@const responded = hasEmployeeResponse(entry) && ei.length > 0}
+                      {@const eSt = responded ? "blue" : ei.some(i => i.includes("Missing")) ? "red" : ei.length > 0 ? "orange" : "clean"}
+                      <!-- svelte-ignore a11y-click-events-have-key-events -->
+                      <!-- svelte-ignore a11y-no-static-element-interactions -->
+                      <div class="te-cell-io te-cell-io-click" on:click={() => openDetail(entry.id)}>
+                        <span>{fmtTime(entry.clock_in)} → {fmtTime(entry.clock_out)}</span>
+                        {#if eSt !== "clean"}
+                          <span class="te-cell-bang-inline te-has-tip" class:te-cell-bang-red={eSt==="red"} class:te-cell-bang-orange={eSt==="orange"} class:te-cell-bang-blue={eSt==="blue"}>
+                            {responded ? "✓" : "!"}
+                            <span class="te-tooltip">{responded ? "Employee responded — needs review · " : ""}{ei.join(" · ")}</span>
+                          </span>
+                        {/if}
+                      </div>
+                    {/each}
+                    <div class="te-cell-entry-hrs">{jg.totalHours.toFixed(1)}h{jg.otHours > 0 ? ` · ${jg.otHours.toFixed(1)}ot` : ""}</div>
                   </div>
-                  <div class="te-cell-job">{de[0].job_number} {de[0].job_name || ""}</div>
-                  <div class="te-cell-io">{fmtTime(de[0].clock_in)} → {fmtTime(de[0].clock_out)}</div>
-                  {#if de.length > 1}<div class="te-cell-more">+{de.length - 1} more</div>{/if}
-                </button>
+                {/each}
               {/if}
             </div>
           {/each}
@@ -513,6 +703,7 @@
         </div>
       {/each}
     </div>
+  {/if}
   {/if}
 </div>
 
@@ -535,15 +726,31 @@
           <button class="btn btn-sm btn-ghost" on:click={closeDetail}>✕</button>
         </div>
 
+        <!-- Geofence approved badge -->
+        {#if d.geofence_approved_by && !adjustMode}
+          <div class="te-geo-approved">
+            <svg viewBox="0 0 16 16" width="13" height="13" fill="none"><path d="M4.5 8.5l3 3 5-5" stroke="#16a34a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            Location approved{d.approver_first_name ? ` by ${d.approver_first_name} ${d.approver_last_name}` : ""} · {new Date(d.geofence_approved_at).toLocaleDateString()}
+          </div>
+        {/if}
+
         <!-- Issues banner -->
         {#if issues.length > 0 && !adjustMode}
+          {@const hasGeoIssue = issues.some(i => i.includes("geofence"))}
           <div class="te-issues-banner">
             <div class="te-issues-title">
               <svg viewBox="0 0 16 16" width="14" height="14"><circle cx="8" cy="11.5" r="1" fill="currentColor"/><rect x="7.25" y="3" width="1.5" height="6" rx=".75" fill="currentColor"/></svg>
               {issues.length} Issue{issues.length > 1 ? "s" : ""} Found
             </div>
             {#each issues as issue}<div class="te-issue-item">{issue}</div>{/each}
-            <button class="te-adjust-btn" on:click={startAdjust}>Adjust Entry</button>
+            <div class="te-issue-actions">
+              {#if hasGeoIssue}
+                <button class="te-approve-btn" on:click={approveGeofence} disabled={approvingGeo}>
+                  {approvingGeo ? "Approving..." : "Approve Location"}
+                </button>
+              {/if}
+              <button class="te-adjust-btn" on:click={startAdjust}>Adjust Entry</button>
+            </div>
           </div>
         {/if}
 
@@ -609,7 +816,10 @@
                 {#if d.clock_in_inside_geofence === 1}<span class="badge badge-xs badge-success">On site</span>
                 {:else if d.clock_in_inside_geofence === 0}<span class="badge badge-xs badge-error">Outside geofence</span>{/if}
               </div>
-              {#if d.clock_in_photo_url}<img src={d.clock_in_photo_url} alt="Clock-in" class="te-d-photo" />{/if}
+              {#if d.clock_in_photo_url}
+                <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
+                <img src={d.clock_in_photo_url} alt="Clock-in" class="te-d-photo te-d-photo-click" on:click={() => expandedPhoto = d.clock_in_photo_url} />
+              {/if}
             </div>
             <div class="te-d-block">
               <div class="te-d-lbl">Clock Out</div>
@@ -622,13 +832,21 @@
                   {:else if d.clock_out_inside_geofence === 0}<span class="badge badge-xs badge-error">Outside geofence</span>{/if}
                 </div>
               {/if}
-              {#if d.clock_out_photo_url}<img src={d.clock_out_photo_url} alt="Clock-out" class="te-d-photo" />{/if}
+              {#if d.clock_out_photo_url}
+                <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
+                <img src={d.clock_out_photo_url} alt="Clock-out" class="te-d-photo te-d-photo-click" on:click={() => expandedPhoto = d.clock_out_photo_url} />
+              {/if}
             </div>
           </div>
 
           {#if d.clock_in_lat && d.clock_in_lng}
             <div class="te-d-map">
-              <img src="/api/maps/static-map?lat={d.job_lat||d.clock_in_lat}&lng={d.job_lng||d.clock_in_lng}&zoom=16&size=600x200&markers={d.clock_in_lat},{d.clock_in_lng}{d.clock_out_lat ? `|${d.clock_out_lat},${d.clock_out_lng}` : ''}" alt="Map" class="te-d-map-img" />
+              <img src="/api/maps/static-map?lat={d.clock_in_lat}&lng={d.clock_in_lng}&size=600x250{d.clock_out_lat ? `&markers=${d.clock_out_lat},${d.clock_out_lng}` : ''}{d.job_lat ? `&jobMarker=${d.job_lat},${d.job_lng}` : ''}" alt="Map" class="te-d-map-img" />
+            </div>
+            <div class="te-d-map-legend">
+              <span><span class="te-legend-dot te-legend-red"></span> Clock In</span>
+              {#if d.clock_out_lat}<span><span class="te-legend-dot te-legend-blue"></span> Clock Out</span>{/if}
+              {#if d.job_lat}<span><span class="te-legend-dot te-legend-green"></span> Job Site</span>{/if}
             </div>
           {/if}
 
@@ -636,7 +854,7 @@
             <div class="te-d-stat"><b>{fmtH(d.hours_regular)}</b><span>Regular</span></div>
             <div class="te-d-stat"><b>{fmtH(d.hours_overtime)}</b><span>OT</span></div>
             <div class="te-d-stat"><b>{fmtH(d.hours_double)}</b><span>DT</span></div>
-            <div class="te-d-stat"><b>{d.break_minutes||0}m</b><span>Break</span></div>
+            <div class="te-d-stat"><b>{d.break_minutes||0}m</b><span>{d.break_minutes === 30 && !d.lunch_out ? "Lunch (auto)" : "Break"}</span></div>
           </div>
 
           {#if d.work_performed}<div class="mb-3"><div class="text-xs font-medium text-base-content/50 mb-1">Work Performed</div><p class="text-sm">{d.work_performed}</p></div>{/if}
@@ -701,8 +919,116 @@
   </div>
 {/if}
 
+<!-- Manual Entry Modal -->
+{#if manualOpen}
+  <div class="modal modal-open">
+    <div class="modal-box max-w-lg">
+      <div class="flex items-start justify-between mb-4">
+        <div>
+          <h3 class="font-bold text-lg">Add Time Record</h3>
+          <p class="text-xs text-base-content/50">Manual entry · source will show as ✏️ manual</p>
+        </div>
+        <button class="btn btn-sm btn-ghost" on:click={closeManualEntry}>✕</button>
+      </div>
+
+      <div class="grid grid-cols-2 gap-3 mb-3">
+        <div>
+          <label class="te-man-label" for="man-emp">Employee <span class="text-error">*</span></label>
+          <select id="man-emp" class="select select-sm select-bordered w-full" bind:value={manualForm.employeeId}>
+            <option value="">Select employee…</option>
+            {#each employees as e}<option value={e.id}>{e.firstName} {e.lastName}</option>{/each}
+          </select>
+        </div>
+        <div>
+          <label class="te-man-label" for="man-job">Job <span class="text-error">*</span></label>
+          <select id="man-job" class="select select-sm select-bordered w-full" bind:value={manualForm.jobId}>
+            <option value="">Select job…</option>
+            {#each jobs as j}<option value={j.id}>{j.jobNumber} — {j.name}</option>{/each}
+          </select>
+        </div>
+      </div>
+
+      <div class="mb-3">
+        <label class="te-man-label" for="man-date">Date <span class="text-error">*</span></label>
+        <input id="man-date" type="date" class="input input-sm input-bordered w-full" bind:value={manualForm.reportDate} />
+      </div>
+
+      <div class="te-man-divider">
+        <span>Clock Times (optional — calculates hours)</span>
+      </div>
+
+      <div class="grid grid-cols-2 gap-3 mb-3">
+        <div>
+          <label class="te-man-label" for="man-in">Clock In</label>
+          <input id="man-in" type="datetime-local" class="input input-sm input-bordered w-full" bind:value={manualForm.clockIn} on:change={manualRecalcHours} />
+        </div>
+        <div>
+          <label class="te-man-label" for="man-out">Clock Out</label>
+          <input id="man-out" type="datetime-local" class="input input-sm input-bordered w-full" bind:value={manualForm.clockOut} on:change={manualRecalcHours} />
+        </div>
+      </div>
+      {#if manualWarn}
+        <div class="te-adjust-warn" style="margin-bottom:8px">{manualWarn}</div>
+      {/if}
+
+      <div class="grid grid-cols-4 gap-3 mb-3">
+        <div>
+          <label class="te-man-label" for="man-reg">Regular</label>
+          <input id="man-reg" type="number" step="0.1" min="0" class="input input-sm input-bordered w-full" bind:value={manualForm.hoursRegular} />
+        </div>
+        <div>
+          <label class="te-man-label" for="man-ot">OT</label>
+          <input id="man-ot" type="number" step="0.1" min="0" class="input input-sm input-bordered w-full" bind:value={manualForm.hoursOvertime} />
+        </div>
+        <div>
+          <label class="te-man-label" for="man-dt">DT</label>
+          <input id="man-dt" type="number" step="0.1" min="0" class="input input-sm input-bordered w-full" bind:value={manualForm.hoursDouble} />
+        </div>
+        <div>
+          <label class="te-man-label" for="man-brk">Break (min)</label>
+          <input id="man-brk" type="number" min="0" class="input input-sm input-bordered w-full" bind:value={manualForm.breakMinutes} on:change={manualRecalcHours} />
+        </div>
+      </div>
+
+      <div class="mb-3">
+        <label class="te-man-label" for="man-work">Work Performed</label>
+        <textarea id="man-work" class="textarea textarea-sm textarea-bordered w-full" rows="2" bind:value={manualForm.workPerformed} placeholder="Description of work done"></textarea>
+      </div>
+      <div class="mb-3">
+        <label class="te-man-label" for="man-notes">Notes</label>
+        <textarea id="man-notes" class="textarea textarea-sm textarea-bordered w-full" rows="1" bind:value={manualForm.notes} placeholder="Any additional notes"></textarea>
+      </div>
+
+      {#if manualError}<p class="text-xs text-error mb-2">{manualError}</p>{/if}
+      <div class="flex gap-2">
+        <button class="btn btn-sm btn-primary" on:click={saveManualEntry} disabled={manualSaving}>
+          {manualSaving ? "Saving..." : "Create Entry"}
+        </button>
+        <button class="btn btn-sm btn-ghost" on:click={closeManualEntry}>Cancel</button>
+      </div>
+    </div>
+    <!-- svelte-ignore a11y-click-events-have-key-events -->
+    <!-- svelte-ignore a11y-no-static-element-interactions -->
+    <div class="modal-backdrop" on:click={closeManualEntry}></div>
+  </div>
+{/if}
+
+<!-- Photo Lightbox -->
+{#if expandedPhoto}
+  <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
+  <div class="te-lightbox" on:click={() => expandedPhoto = null}>
+    <button class="te-lightbox-close" on:click={() => expandedPhoto = null}>✕</button>
+    <img src={expandedPhoto} alt="Expanded photo" class="te-lightbox-img" />
+  </div>
+{/if}
+
 <style>
   .te { max-width: 100%; }
+
+  .te-tabs { display: flex; gap: 2px; background: #f1f5f9; border-radius: 8px; padding: 2px; }
+  .te-tab { padding: 6px 14px; border: none; background: transparent; border-radius: 6px; font-size: 0.8rem; font-weight: 500; cursor: pointer; color: #64748b; transition: all 0.15s; }
+  .te-tab:hover { color: #1e293b; }
+  .te-tab-active { background: #fff; color: #1e293b; font-weight: 600; box-shadow: 0 1px 2px rgba(0,0,0,0.05); }
 
   .te-header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
   .te-h1 { font-size: 22px; font-weight: 700; color: #1d1d1f; letter-spacing: -0.02em; margin: 0; }
@@ -745,7 +1071,7 @@
   .te-ci-orange { background: #fff7ed; color: #ea580c; }
   .te-ci-yellow { background: #fefce8; color: #a16207; }
   .te-card-warn .te-card-val { color: #ea580c; }
-  .te-card-err { border-color: #fca5a5; background: #fef8f8; }
+  .te-card-err { border-color: #ef4444; background: white; }
   .te-card-err .te-card-val { color: #dc2626; }
 
   /* Stacked avatar circles */
@@ -754,6 +1080,7 @@
     width: 28px; height: 28px; border-radius: 50%; background: #007aff; color: white;
     font-size: 0.5625rem; font-weight: 700; display: flex; align-items: center; justify-content: center;
     border: 2px solid white; margin-left: -8px; letter-spacing: 0.02em;
+    object-fit: cover;
   }
   .te-avatar:first-child { margin-left: 0; }
   .te-avatar-gray { background: #94a3b8; }
@@ -797,13 +1124,14 @@
 
   .te-emp {
     padding: 10px 16px; display: flex; align-items: center; gap: 6px;
-    border-right: 1px solid #f2f2f7;
+    border-right: 1px solid #f2f2f7; background: #f9f9fb;
   }
   .te-emp-name { font-size: 0.8125rem; font-weight: 600; color: #1d1d1f; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0; }
 
-  /* Employee row glow — left border + subtle bg tint */
-  .te-emp-glow-red { box-shadow: inset 3px 0 0 #ef4444; background: #fef8f8; }
-  .te-emp-glow-yellow { box-shadow: inset 3px 0 0 #f59e0b; background: #fffdf5; }
+  /* Employee row glow — left border only, no bg tint */
+  .te-emp-glow-red { box-shadow: inset 3px 0 0 #ef4444; }
+  .te-emp-glow-orange { box-shadow: inset 3px 0 0 #ea580c; }
+  .te-emp-glow-blue { box-shadow: inset 3px 0 0 #007aff; }
 
   .te-issue-pill {
     display: inline-flex; align-items: center; justify-content: center; position: relative;
@@ -812,7 +1140,8 @@
     flex-shrink: 0; line-height: 1; cursor: default;
   }
   .te-issue-pill-red { color: #dc2626; background: #fee2e2; }
-  .te-issue-pill-yellow { color: #b45309; background: #fef3c7; }
+  .te-issue-pill-orange { color: #ea580c; background: #fff1e6; }
+  .te-issue-pill-blue { color: #007aff; background: #e8f2ff; }
 
   /* Tooltip — shared by issue pill and status chips */
   .te-tooltip {
@@ -839,28 +1168,53 @@
   .te-cell {
     width: 100%; flex: 1; padding: 6px 7px; background: #f9f9fb; border: 1px solid transparent;
     border-radius: 8px; cursor: pointer; text-align: left; font-family: inherit;
-    transition: all 0.1s; display: flex; flex-direction: column;
+    transition: all 0.15s; display: flex; flex-direction: column;
     min-width: 0; overflow: hidden;
   }
   .te-cell:hover { border-color: #007aff; background: #f0f5ff; }
 
-  .te-cell-red { background: #fef8f8; border-color: #fecaca !important; }
-  .te-cell-red:hover { background: #fef2f2; border-color: #f87171 !important; }
-  .te-cell-yellow { background: #fffdf5; border-color: #fde68a !important; }
-  .te-cell-yellow:hover { background: #fefce8; border-color: #fbbf24 !important; }
+  /* Red glow — missed clock in/out */
+  .te-cell-red { border-color: #ef4444 !important; box-shadow: 0 0 8px 2px rgba(239,68,68,0.22), 0 0 20px 6px rgba(239,68,68,0.10); }
+  .te-cell-red:hover { border-color: #dc2626 !important; box-shadow: 0 0 14px 4px rgba(239,68,68,0.32), 0 0 28px 8px rgba(239,68,68,0.14); }
+
+  /* Orange glow — geofence / break issues */
+  .te-cell-orange { border-color: #ea580c !important; box-shadow: 0 0 8px 2px rgba(234,88,12,0.22), 0 0 20px 6px rgba(234,88,12,0.10); }
+  .te-cell-orange:hover { border-color: #c2410c !important; box-shadow: 0 0 14px 4px rgba(234,88,12,0.32), 0 0 28px 8px rgba(234,88,12,0.14); }
+
+  /* Blue glow — employee responded, needs management review */
+  .te-cell-blue { border-color: #007aff !important; box-shadow: 0 0 8px 2px rgba(0,122,255,0.22), 0 0 20px 6px rgba(0,122,255,0.10); }
+  .te-cell-blue:hover { border-color: #0056d6 !important; box-shadow: 0 0 14px 4px rgba(0,122,255,0.32), 0 0 28px 8px rgba(0,122,255,0.14); }
 
   .te-cell-r1 { display: flex; align-items: center; justify-content: space-between; margin-bottom: 2px; }
   .te-cell-h { font-size: 0.875rem; font-weight: 700; color: #1d1d1f; }
-  .te-status-chip {
-    display: inline-flex; align-items: center; justify-content: center;
-    width: 22px; height: 22px; border-radius: 7px; flex-shrink: 0;
+  .te-cell-day-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 4px 7px 2px; margin-bottom: 2px;
   }
-  .te-chip-green { background: #dcfce7; }
-  .te-chip-yellow { background: #fef3c7; }
-  .te-chip-red { background: #fee2e2; }
-  .te-cell-job { font-size: 0.6875rem; color: #636366; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 1px; }
+  .te-cell-entry { margin-bottom: 3px; flex: none; }
+  .te-cell-entry:last-child { margin-bottom: 0; }
+  .te-cell-entry-hrs { font-size: 0.625rem; color: #aeaeb2; font-weight: 500; margin-top: 1px; }
+  .te-cell-job-row { display: flex; align-items: center; gap: 3px; min-width: 0; margin-bottom: 1px; }
+  .te-cell-job { font-size: 0.6875rem; color: #636366; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0; }
+  .te-cell-bang {
+    font-size: 0.6875rem; font-weight: 800; flex-shrink: 0; line-height: 1;
+    position: relative; cursor: default;
+  }
+  .te-cell-bang-red { color: #ef4444; }
+  .te-cell-bang-orange { color: #ea580c; }
+  .te-cell-bang-blue { color: #007aff; }
   .te-cell-io { font-size: 0.6875rem; color: #86868b; white-space: nowrap; }
-  .te-cell-more { font-size: 0.5625rem; color: #007aff; font-weight: 500; margin-top: 2px; }
+  .te-cell-io-click { cursor: pointer; border-radius: 3px; padding: 1px 3px; margin: 0 -3px; transition: background 0.1s; display: flex; align-items: center; justify-content: space-between; gap: 4px; }
+  .te-cell-io-click:hover { background: rgba(249, 115, 22, 0.1); color: #ea580c; }
+  .te-cell-bang-inline {
+    font-size: 0.625rem; font-weight: 800; flex-shrink: 0; line-height: 1;
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 14px; height: 14px; border-radius: 50%;
+    position: relative; cursor: default;
+  }
+  .te-cell-bang-inline.te-cell-bang-red { color: #fff; background: #ef4444; }
+  .te-cell-bang-inline.te-cell-bang-orange { color: #fff; background: #ea580c; }
+  .te-cell-bang-inline.te-cell-bang-blue { color: #fff; background: #007aff; }
 
   /* Hours column */
   .te-g-hrs { border-left: 1px solid #f2f2f7; }
@@ -883,8 +1237,21 @@
   .te-d-addr { font-size: 0.75rem; color: #86868b; margin-top: 2px; }
   .te-d-coords { font-size: 0.6875rem; color: #aeaeb2; font-family: monospace; }
   .te-d-photo { margin-top: 8px; border-radius: 8px; max-height: 120px; object-fit: cover; width: 100%; }
-  .te-d-map { margin-bottom: 16px; border-radius: 12px; overflow: hidden; border: 1px solid #e5e5ea; }
-  .te-d-map-img { width: 100%; height: 180px; object-fit: cover; display: block; }
+  .te-d-photo-click { cursor: pointer; transition: opacity 0.15s, transform 0.15s; }
+  .te-d-photo-click:hover { opacity: 0.85; transform: scale(1.02); }
+  .te-d-map { border-radius: 12px; overflow: hidden; border: 1px solid #e5e5ea; }
+  .te-d-map-img { width: 100%; height: 200px; object-fit: cover; display: block; }
+  .te-d-map-legend { display: flex; gap: 14px; padding: 6px 0 16px; font-size: 0.75rem; color: #64748b; }
+  .te-legend-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px; vertical-align: middle; }
+  .te-legend-red { background: #EF4444; }
+  .te-legend-blue { background: #4285F4; }
+  .te-legend-green { background: #34A853; }
+
+  /* Photo lightbox */
+  .te-lightbox { position: fixed; inset: 0; z-index: 9999; background: rgba(0,0,0,0.85); display: flex; align-items: center; justify-content: center; cursor: pointer; }
+  .te-lightbox-img { max-width: 90vw; max-height: 90vh; border-radius: 12px; object-fit: contain; box-shadow: 0 8px 40px rgba(0,0,0,0.4); }
+  .te-lightbox-close { position: absolute; top: 16px; right: 20px; background: rgba(255,255,255,0.15); border: none; color: #fff; font-size: 1.25rem; width: 36px; height: 36px; border-radius: 50%; cursor: pointer; display: flex; align-items: center; justify-content: center; backdrop-filter: blur(4px); }
+  .te-lightbox-close:hover { background: rgba(255,255,255,0.3); }
   .te-d-stat { background: #f9f9fb; border-radius: 8px; padding: 8px 6px; display: flex; flex-direction: column; align-items: center; gap: 2px; }
   .te-d-stat b { font-size: 0.9375rem; font-weight: 700; color: #1d1d1f; }
   .te-d-stat span { font-size: 0.5625rem; color: #aeaeb2; text-transform: uppercase; }
@@ -899,12 +1266,26 @@
     font-size: 0.8125rem; font-weight: 600; color: #dc2626; margin-bottom: 6px;
   }
   .te-issue-item { font-size: 0.75rem; color: #7f1d1d; padding: 2px 0 2px 20px; }
+  .te-issue-actions { display: flex; gap: 8px; margin-top: 8px; }
   .te-adjust-btn {
-    margin-top: 8px; padding: 6px 14px; font-size: 0.75rem; font-weight: 600;
+    padding: 6px 14px; font-size: 0.75rem; font-weight: 600;
     background: #dc2626; color: white; border: none; border-radius: 7px;
     cursor: pointer; font-family: inherit;
   }
   .te-adjust-btn:hover { background: #b91c1c; }
+  .te-approve-btn {
+    padding: 6px 14px; font-size: 0.75rem; font-weight: 600;
+    background: #16a34a; color: white; border: none; border-radius: 7px;
+    cursor: pointer; font-family: inherit;
+  }
+  .te-approve-btn:hover { background: #15803d; }
+  .te-approve-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+  .te-geo-approved {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 0.75rem; font-weight: 500; color: #16a34a;
+    background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 8px;
+    padding: 8px 12px; margin-bottom: 12px;
+  }
 
   /* Adjust form */
   .te-adjust-form { background: #f9f9fb; border: 1px solid #e5e5ea; border-radius: 12px; padding: 16px; margin-bottom: 16px; }
@@ -927,6 +1308,41 @@
   .te-audit-vals { color: #007aff; }
   .te-audit-reason { color: #86868b; font-style: italic; }
   .te-audit-when { color: #aeaeb2; float: right; }
+
+  /* Add Record button */
+  .te-add-record-btn {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-size: 0.75rem; font-weight: 600; color: #007aff;
+    padding: 5px 12px; border: 1px solid #007aff; border-radius: 7px;
+    background: white; cursor: pointer; transition: all 0.15s;
+    margin-left: auto;
+  }
+  .te-add-record-btn:hover { background: #007aff; color: white; }
+  .te-add-record-btn svg { transition: stroke 0.15s; }
+  .te-add-record-btn:hover svg { stroke: white; }
+
+  /* Empty day cell — clickable for manual entry */
+  .te-g-day-empty {
+    cursor: pointer; transition: background 0.15s;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .te-g-day-empty:hover { background: #f0f5ff; }
+  .te-empty-plus {
+    font-size: 1.25rem; font-weight: 300; color: #c7c7cc;
+    transition: color 0.15s, transform 0.15s;
+    user-select: none;
+  }
+  .te-g-day-empty:hover .te-empty-plus { color: #007aff; transform: scale(1.2); }
+
+  /* Manual entry modal labels */
+  .te-man-label { display: block; font-size: 0.6875rem; font-weight: 500; color: #86868b; margin-bottom: 3px; }
+  .te-man-divider {
+    display: flex; align-items: center; gap: 10px;
+    font-size: 0.6875rem; color: #aeaeb2; margin: 8px 0 10px;
+  }
+  .te-man-divider::before, .te-man-divider::after {
+    content: ""; flex: 1; height: 1px; background: #f2f2f7;
+  }
 
   /* Responsive */
   @media (max-width: 1400px) {

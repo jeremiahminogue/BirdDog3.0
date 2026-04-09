@@ -11,7 +11,7 @@
     address: string;
     gcContact: string;
     status: string;
-    currentContract: number;
+    contractAmount: number;
     jurisdictionId?: number;
     jurisdictionName?: string;
     showOnBoard?: boolean;
@@ -155,9 +155,9 @@
             <span class="jc-jur">{job.jurisdictionName}</span>
           {/if}
         </div>
-        {#if job.currentContract}
+        {#if job.contractAmount}
           <div class="jc-contract">
-            {formatCurrency(job.currentContract)}
+            {formatCurrency(job.contractAmount)}
           </div>
         {/if}
       </div>

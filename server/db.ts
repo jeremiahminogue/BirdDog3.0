@@ -480,7 +480,7 @@ export function initDb() {
       topic TEXT NOT NULL,
       generated_content TEXT,
       presented_by INTEGER REFERENCES employees(id),
-      status TEXT DEFAULT 'draft' CHECK(status IN ('draft','scheduled','completed')),
+      status TEXT DEFAULT 'draft' CHECK(status IN ('draft','scheduled','presented','completed')),
       duration INTEGER,
       notes TEXT,
       created_at TEXT DEFAULT (datetime('now')),
@@ -535,6 +535,23 @@ export function initDb() {
       created_at TEXT DEFAULT (datetime('now'))
     )
   `);
+
+  // ── Job Codes ───────────────────────────────────────────────────
+  sqlite.run(`
+    CREATE TABLE IF NOT EXISTS job_codes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      company_id INTEGER NOT NULL REFERENCES companies(id),
+      code TEXT NOT NULL,
+      description TEXT NOT NULL,
+      is_active INTEGER NOT NULL DEFAULT 1,
+      sort_order INTEGER DEFAULT 0,
+      created_at TEXT DEFAULT (datetime('now'))
+    )
+  `);
+  // Add job_code_id column to time_entries if missing
+  try {
+    sqlite.run("ALTER TABLE time_entries ADD COLUMN job_code_id INTEGER REFERENCES job_codes(id)");
+  } catch { /* column already exists */ }
 
   // Indexes
   sqlite.run("CREATE INDEX IF NOT EXISTS idx_employees_status ON employees(status)");
@@ -594,6 +611,11 @@ export function initDb() {
   sqlite.run("CREATE INDEX IF NOT EXISTS idx_change_orders_assigned ON change_order_requests(assigned_to)");
   sqlite.run("CREATE INDEX IF NOT EXISTS idx_change_orders_requested ON change_order_requests(requested_by)");
   sqlite.run("CREATE INDEX IF NOT EXISTS idx_change_order_photos_co ON change_order_photos(change_order_id)");
+
+  // Job codes indexes
+  sqlite.run("CREATE INDEX IF NOT EXISTS idx_job_codes_company ON job_codes(company_id)");
+  sqlite.run("CREATE INDEX IF NOT EXISTS idx_job_codes_active ON job_codes(is_active)");
+  sqlite.run("CREATE INDEX IF NOT EXISTS idx_time_entries_job_code ON time_entries(job_code_id)");
 
   // NOTE: company_id indexes are created by migrate.ts AFTER adding the company_id columns
 }

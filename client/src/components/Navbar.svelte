@@ -161,6 +161,7 @@
     children: [
       { id: 'admin', label: 'Admin Panel', icon: 'M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm0 10.99h7c-.53 4.12-3.28 7.79-7 8.94V12H5V6.3l7-3.11v8.8z' },
       { id: 'classifications', label: 'Classifications', icon: 'M3 4h18v2H3V4zm0 7h18v2H3v-2zm0 7h18v2H3v-2z' },
+      { id: 'job-codes', label: 'Job Codes', icon: 'M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A2 2 0 013 12V7a4 4 0 014-4z' },
       { id: 'jurisdictions', label: 'Jurisdictions', icon: 'M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z' },
     ],
   };
@@ -295,6 +296,14 @@
       <button class="sb-item" class:sb-active={$currentPage === 'reports'} on:click={() => handleNavClick('reports')} title={collapsed ? 'Reports' : ''}>
         <svg class="sb-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M5 9.2h3V19H5zM10.6 5h2.8v14h-2.8zm5.6 8H19v6h-2.8z" /></svg>
         <span class="sb-text">Reports</span>
+      </button>
+    {/if}
+
+    <!-- Communicate — standalone loudspeaker -->
+    {#if canReport}
+      <button class="sb-item" class:sb-active={$currentPage === 'communicate'} on:click={() => handleNavClick('communicate')} title={collapsed ? 'Communicate' : ''}>
+        <svg class="sb-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M3 14h2v6c0 .55.45 1 1 1h2c.55 0 1-.45 1-1v-6h.39c.38 1.52 1.68 2.64 3.32 2.9l.29.04V14h1V8h-1v-2.94l-.29.04C10.07 5.36 8.77 6.48 8.39 8H3c-.55 0-1 .45-1 1v4c0 .55.45 1 1 1zm11-5v6c2.49-.45 4.44-2.56 4.87-5.18.05-.26.08-.53.1-.82.02-.33.03-.67.03-1 0-.33-.01-.67-.03-1-.02-.29-.05-.56-.1-.82C18.44 3.56 16.49 1.45 14 1V3c1.86.45 3.28 1.96 3.71 3.87.05.25.09.5.12.76.02.24.03.49.03.74v.26c0 .25-.01.5-.03.74-.03.26-.07.51-.12.76C17.28 12.04 15.86 13.55 14 14V9z"/></svg>
+        <span class="sb-text">Communicate</span>
       </button>
     {/if}
 

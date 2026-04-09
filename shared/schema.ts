@@ -27,7 +27,8 @@ export const users = sqliteTable("users", {
   username: text("username").notNull().unique(),
   passwordHash: text("password_hash").notNull(),
   displayName: text("display_name").notNull(),
-  role: text("role", { enum: ["super_admin", "admin", "pm", "readonly"] }).notNull().default("readonly"),
+  role: text("role", { enum: ["super_admin", "admin", "pm", "foreman", "field_staff"] }).notNull().default("field_staff"),
+  employeeId: integer("employee_id").references(() => employees.id),
   companyId: integer("company_id").references(() => companies.id),
   isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
   createdAt: text("created_at").default(sql`(datetime('now'))`),
@@ -221,6 +222,49 @@ export const assets = sqliteTable("assets", {
   notes: text("notes"),
   createdAt: text("created_at").default(sql`(datetime('now'))`),
   updatedAt: text("updated_at").default(sql`(datetime('now'))`),
+});
+
+// ── Tool Reports (field-reported issues: damaged, lost, stolen, needs service) ──
+export const toolReports = sqliteTable("tool_reports", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  companyId: integer("company_id").notNull().references(() => companies.id),
+  assetId: integer("asset_id").notNull().references(() => assets.id, { onDelete: "cascade" }),
+  reportedBy: integer("reported_by").notNull().references(() => employees.id),
+  reportType: text("report_type", { enum: ["damaged", "lost", "stolen", "needs_maintenance", "needs_calibration"] }).notNull(),
+  severity: text("severity", { enum: ["can_still_use", "out_of_service", "safety_hazard"] }).notNull(),
+  description: text("description").notNull(),
+  photoUrl: text("photo_url"),
+  lat: real("lat"),
+  lng: real("lng"),
+  status: text("status", { enum: ["open", "acknowledged", "in_repair", "resolved"] }).default("open").notNull(),
+  resolvedBy: integer("resolved_by").references(() => users.id),
+  resolvedAt: text("resolved_at"),
+  resolutionNote: text("resolution_note"),
+  createdAt: text("created_at").default(sql`(datetime('now'))`),
+});
+
+// ── Tool History (immutable audit log — every assignment, report, repair, transfer) ──
+export const toolHistory = sqliteTable("tool_history", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  companyId: integer("company_id").notNull().references(() => companies.id),
+  assetId: integer("asset_id").notNull().references(() => assets.id, { onDelete: "cascade" }),
+  eventType: text("event_type", { enum: [
+    "assigned", "unassigned", "transferred", "returned",
+    "reported_damaged", "reported_lost", "reported_stolen",
+    "reported_maintenance", "reported_calibration",
+    "sent_to_repair", "repaired", "calibrated",
+    "condition_changed", "status_changed", "retired", "created"
+  ] }).notNull(),
+  employeeId: integer("employee_id").references(() => employees.id),
+  jobId: integer("job_id").references(() => jobs.id),
+  fromEmployeeId: integer("from_employee_id").references(() => employees.id),
+  toEmployeeId: integer("to_employee_id").references(() => employees.id),
+  note: text("note"),
+  reportId: integer("report_id").references(() => toolReports.id),
+  performedBy: integer("performed_by").references(() => users.id),
+  lat: real("lat"),
+  lng: real("lng"),
+  createdAt: text("created_at").default(sql`(datetime('now'))`),
 });
 
 // ── Employee Notes ──────────────────────────────────────────────
@@ -494,6 +538,7 @@ export const timeEntries = sqliteTable("time_entries", {
   lunchOut: text("lunch_out"),                         // ISO 8601
   lunchIn: text("lunch_in"),                           // ISO 8601
 
+  jobCodeId: integer("job_code_id").references(() => jobCodes.id), // type of work being performed
   workPerformed: text("work_performed"),               // what this person did
   notes: text("notes"),
   createdAt: text("created_at").default(sql`(datetime('now'))`),
@@ -591,6 +636,18 @@ export const changeOrderPhotos = sqliteTable("change_order_photos", {
   createdAt: text("created_at").default(sql`(datetime('now'))`),
 });
 
+// ── Job Codes (work type categories for time tracking) ────────
+// Managed by office users. Field crew selects one when clocking in.
+export const jobCodes = sqliteTable("job_codes", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  companyId: integer("company_id").notNull().references(() => companies.id),
+  code: text("code").notNull(),                            // short code e.g. "RGH", "TRIM", "SVC"
+  description: text("description").notNull(),              // full name e.g. "Rough-In", "Trim", "Service Call"
+  isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
+  sortOrder: integer("sort_order").default(0),
+  createdAt: text("created_at").default(sql`(datetime('now'))`),
+});
+
 // ── Live Locations (real-time crew map) ───────────────────────
 // Updated from mobile/tablet every few minutes while clocked in.
 // Only latest row per employee matters — older rows are history.
@@ -611,6 +668,117 @@ export const liveLocations = sqliteTable("live_locations", {
   insideGeofence: integer("inside_geofence", { mode: "boolean" }),
   timeEntryId: integer("time_entry_id").references(() => timeEntries.id), // active clock-in
   recordedAt: text("recorded_at").notNull().default(sql`(datetime('now'))`),
+});
+
+// ── Time Entry Issues (clock in/out problems requiring resolution) ──
+export const timeEntryIssues = sqliteTable("time_entry_issues", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  companyId: integer("company_id").notNull().references(() => companies.id),
+  timeEntryId: integer("time_entry_id").references(() => timeEntries.id, { onDelete: "cascade" }),
+  employeeId: integer("employee_id").notNull().references(() => employees.id),
+  issueType: text("issue_type", { enum: ["missed_clock_out", "outside_geofence", "missing_photo", "excessive_hours"] }).notNull(),
+  issueDetails: text("issue_details"),                     // e.g. "16.5 hours", "0.8 mi from site"
+  status: text("status", { enum: ["pending", "noted", "approved", "rejected"] }).default("pending").notNull(),
+  employeeNote: text("employee_note"),                     // explanation from the field worker
+  employeeNotedAt: text("employee_noted_at"),              // when the note was submitted
+  resolvedBy: integer("resolved_by").references(() => employees.id),  // manager who approved/rejected
+  resolvedAt: text("resolved_at"),
+  managerNote: text("manager_note"),                       // optional manager comment
+  reportDate: text("report_date").notNull(),               // YYYY-MM-DD the issue relates to
+  lastNotifiedAt: text("last_notified_at"),                // when the last push notification was sent
+  detectedAt: text("detected_at").default(sql`(datetime('now'))`),
+  createdAt: text("created_at").default(sql`(datetime('now'))`),
+});
+
+// ── Time Correction Requests (employee self-service corrections) ──
+export const timeCorrectionRequests = sqliteTable("time_correction_requests", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  companyId: integer("company_id").notNull().references(() => companies.id),
+  timeEntryId: integer("time_entry_id").references(() => timeEntries.id, { onDelete: "cascade" }),
+  issueId: integer("issue_id").references(() => timeEntryIssues.id),  // optional link to detected issue
+  employeeId: integer("employee_id").notNull().references(() => employees.id),
+  correctionType: text("correction_type", { enum: ["missed_clock_out", "wrong_time", "wrong_job", "other"] }).notNull(),
+  requestedClockIn: text("requested_clock_in"),     // corrected clock-in time
+  requestedClockOut: text("requested_clock_out"),    // corrected clock-out time
+  requestedJobId: integer("requested_job_id").references(() => jobs.id),
+  note: text("note").notNull(),                      // employee explanation
+  status: text("status", { enum: ["pending", "approved", "rejected"] }).default("pending").notNull(),
+  resolvedBy: integer("resolved_by").references(() => users.id),
+  resolvedAt: text("resolved_at"),
+  managerNote: text("manager_note"),
+  reportDate: text("report_date").notNull(),         // YYYY-MM-DD
+  createdAt: text("created_at").default(sql`(datetime('now'))`),
+});
+
+export type TimeCorrectionRequest = typeof timeCorrectionRequests.$inferSelect;
+
+// ── Time Off / Sick Leave / General Requests (mobile → office) ──
+export const timeOffRequests = sqliteTable("time_off_requests", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  companyId: integer("company_id").notNull().references(() => companies.id),
+  employeeId: integer("employee_id").notNull().references(() => employees.id),
+  requestType: text("request_type", { enum: ["paid_sick_leave", "time_off", "general_note"] }).notNull(),
+  startDate: text("start_date").notNull(),          // YYYY-MM-DD
+  endDate: text("end_date"),                         // null for single-day or general notes
+  hoursRequested: real("hours_requested"),            // total PTO/sick hours requested
+  note: text("note").notNull(),                      // employee explanation
+  status: text("status", { enum: ["pending", "approved", "rejected"] }).default("pending").notNull(),
+  resolvedBy: integer("resolved_by").references(() => users.id),
+  resolvedAt: text("resolved_at"),
+  managerNote: text("manager_note"),
+  createdAt: text("created_at").default(sql`(datetime('now'))`),
+});
+
+export type TimeOffRequest = typeof timeOffRequests.$inferSelect;
+
+// ── PTO / Sick Leave Balances ──
+export const employeePtoBalances = sqliteTable("employee_pto_balances", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  companyId: integer("company_id").notNull().references(() => companies.id),
+  employeeId: integer("employee_id").notNull().references(() => employees.id),
+  balanceType: text("balance_type", { enum: ["pto", "sick"] }).notNull(),
+  accruedHours: real("accrued_hours").default(0).notNull(),
+  usedHours: real("used_hours").default(0).notNull(),
+  adjustedHours: real("adjusted_hours").default(0).notNull(),  // manual adjustments (+/-)
+  updatedAt: text("updated_at").default(sql`(datetime('now'))`),
+});
+
+export type EmployeePtoBalance = typeof employeePtoBalances.$inferSelect;
+
+// ── Push Notification Tokens (Expo push tokens per user/device) ──
+export const pushTokens = sqliteTable("push_tokens", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  companyId: integer("company_id").notNull().references(() => companies.id),
+  employeeId: integer("employee_id").notNull().references(() => employees.id),
+  token: text("token").notNull(),                          // Expo push token (ExponentPushToken[...])
+  platform: text("platform", { enum: ["ios", "android"] }),
+  isActive: integer("is_active", { mode: "boolean" }).default(true),
+  createdAt: text("created_at").default(sql`(datetime('now'))`),
+  updatedAt: text("updated_at").default(sql`(datetime('now'))`),
+});
+
+// ── Announcements (Communicate feature — push messages to field crews) ──
+export const announcements = sqliteTable("announcements", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  companyId: integer("company_id").notNull().references(() => companies.id),
+  sentBy: integer("sent_by").notNull().references(() => users.id),
+  title: text("title").notNull(),
+  body: text("body").notNull(),
+  priority: text("priority", { enum: ["normal", "urgent"] }).notNull().default("normal"),
+  audience: text("audience", { enum: ["company", "job", "individual"] }).notNull(),
+  targetJobId: integer("target_job_id").references(() => jobs.id),
+  targetEmployeeId: integer("target_employee_id").references(() => employees.id),
+  pushSent: integer("push_sent").default(0),           // count of push notifications sent
+  pushFailed: integer("push_failed").default(0),       // count that failed delivery
+  sentAt: text("sent_at").default(sql`(datetime('now'))`),
+});
+
+// ── Announcement Read Receipts ──────────────────────────────────
+export const announcementReads = sqliteTable("announcement_reads", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  announcementId: integer("announcement_id").notNull().references(() => announcements.id, { onDelete: "cascade" }),
+  employeeId: integer("employee_id").notNull().references(() => employees.id),
+  readAt: text("read_at").default(sql`(datetime('now'))`),
 });
 
 // ── Type exports ────────────────────────────────────────────────
@@ -644,9 +812,14 @@ export type OpportunityGc = typeof opportunityGcs.$inferSelect;
 export type OpportunitySupplier = typeof opportunitySuppliers.$inferSelect;
 export type DailyReport = typeof dailyReports.$inferSelect;
 export type TimeEntry = typeof timeEntries.$inferSelect;
+export type JobCode = typeof jobCodes.$inferSelect;
 export type LiveLocation = typeof liveLocations.$inferSelect;
 export type JobPhoto = typeof jobPhotos.$inferSelect;
 export type ToolboxTalk = typeof toolboxTalks.$inferSelect;
 export type ToolboxTalkAttendee = typeof toolboxTalkAttendees.$inferSelect;
 export type ChangeOrderRequest = typeof changeOrderRequests.$inferSelect;
 export type ChangeOrderPhoto = typeof changeOrderPhotos.$inferSelect;
+export type TimeEntryIssue = typeof timeEntryIssues.$inferSelect;
+export type PushToken = typeof pushTokens.$inferSelect;
+export type Announcement = typeof announcements.$inferSelect;
+export type AnnouncementRead = typeof announcementReads.$inferSelect;

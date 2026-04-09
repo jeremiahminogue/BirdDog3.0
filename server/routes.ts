@@ -4,7 +4,7 @@ import {
   employees, classifications, jobs, jobBudgets, jobCosts,
   jobAssignments, subcontracts, certifications, assets,
   employeeNotes, users, jurisdictions, jurisdictionRates, settings,
-  companies, scheduledMoves
+  companies, scheduledMoves, jobCodes
 } from "../shared/schema.js";
 import { eq, and, sql, desc } from "drizzle-orm";
 import { requireAuth, requireRole, requireSuperAdmin } from "./auth.js";
@@ -13,6 +13,7 @@ import bcrypt from "bcryptjs";
 import { validate, ClassificationSchema, EmployeeSchema, JobSchema, AssignmentSchema, CostSchema, BudgetSchema, AssetSchema, JurisdictionSchema, RateSchema, UserSchema } from "./validation.js";
 import { mkdirSync, writeFileSync, readdirSync, unlinkSync } from "fs";
 import { dirname } from "path";
+import { logToolEvent } from "./tool-management.js";
 
 // ── S-09/S-10 FIX: Shared upload validator (magic bytes + size) ──
 const MAX_UPLOAD = 5 * 1024 * 1024; // 5MB
@@ -43,7 +44,7 @@ const api = new Hono();
 
 // ── Public Settings (no auth — needed on login page) ────────────
 // Only expose safe display keys (company name, logo, theme) — never internal config
-const PUBLIC_SETTINGS_KEYS = new Set(["companyName", "companyLogo", "theme", "accentColor"]);
+const PUBLIC_SETTINGS_KEYS = new Set(["companyName", "companyShort", "companyLogo", "theme", "accentColor", "autoDeductLunch"]);
 api.get("/settings", async (c) => {
   const cid = parseInt(c.req.query("companyId") || "1");
   if (isNaN(cid) || cid < 1) return c.json({});
@@ -626,8 +627,6 @@ api.get("/workforce-board", async (c) => {
       startDate: jobs.startDate,
       endDate: jobs.endDate,
       scopeOfWork: jobs.scopeOfWork,
-      originalContract: jobs.originalContract,
-      currentContract: jobs.currentContract,
       showOnBoard: jobs.showOnBoard,
       createdAt: jobs.createdAt,
       updatedAt: jobs.updatedAt,
@@ -647,7 +646,8 @@ api.get("/workforce-board", async (c) => {
   const detailFinance = sqlite.query(`
     SELECT job_id, hour_budget, hours_used,
            material_budget, material_cost,
-           general_budget, general_cost
+           general_budget, general_cost,
+           total_contract
     FROM project_finance_data
     WHERE (report_type = 'detail' OR report_type IS NULL)
       AND id IN (
@@ -659,7 +659,8 @@ api.get("/workforce-board", async (c) => {
   const summaryFinance = sqlite.query(`
     SELECT job_id,
            equipment_curr_budget, equipment_cost_to_date,
-           general_curr_budget, general_cost_to_date
+           general_curr_budget, general_cost_to_date,
+           revised_contract_price
     FROM project_finance_data
     WHERE report_type = 'summary'
       AND id IN (
@@ -684,6 +685,7 @@ api.get("/workforce-board", async (c) => {
       equipmentCost: s?.equipment_cost_to_date || 0,
       generalBudget: s?.general_curr_budget || f.general_budget || 0,
       generalCost: s?.general_cost_to_date || f.general_cost || 0,
+      contractAmount: s?.revised_contract_price || f.total_contract || 0,
     });
   }
 
@@ -807,6 +809,7 @@ api.get("/workforce-board", async (c) => {
 
     return {
       ...job,
+      contractAmount: finance?.contractAmount || 0,
       crew,
       crewCount: crew.length,
       budgets: jobBudgetData,
@@ -1036,6 +1039,29 @@ api.post("/assets", requireRole("admin", "pm"), validate(AssetSchema), async (c)
   if (data.assignedToJob) data.assignedToJob = parseInt(data.assignedToJob) || null;
   if (data.purchaseCost) data.purchaseCost = parseFloat(data.purchaseCost) || null;
   const [row] = await db.insert(assets).values({ ...data, companyId }).returning();
+
+  // Log creation to tool history
+  await logToolEvent({
+    companyId,
+    assetId: row.id,
+    eventType: "created",
+    employeeId: row.assignedToEmployee || null,
+    jobId: row.assignedToJob || null,
+    performedBy: (c.get("user") as any)?.id,
+  });
+
+  // If assigned on creation, log that too
+  if (row.assignedToEmployee) {
+    await logToolEvent({
+      companyId,
+      assetId: row.id,
+      eventType: "assigned",
+      employeeId: row.assignedToEmployee,
+      jobId: row.assignedToJob || null,
+      performedBy: (c.get("user") as any)?.id,
+    });
+  }
+
   return c.json(row, 201);
 });
 
@@ -1047,7 +1073,45 @@ api.put("/assets/:id", requireRole("admin", "pm"), async (c) => {
   if (data.assignedToEmployee !== undefined) data.assignedToEmployee = data.assignedToEmployee ? parseInt(data.assignedToEmployee) : null;
   if (data.assignedToJob !== undefined) data.assignedToJob = data.assignedToJob ? parseInt(data.assignedToJob) : null;
   if (data.purchaseCost !== undefined) data.purchaseCost = data.purchaseCost ? parseFloat(data.purchaseCost) : null;
+
+  // Get current state before update (for history tracking)
+  const [before] = await db.select({
+    assignedToEmployee: assets.assignedToEmployee,
+    assignedToJob: assets.assignedToJob,
+    status: assets.status,
+    condition: assets.condition,
+  }).from(assets).where(and(eq(assets.id, id), eq(assets.companyId, companyId)));
+
   const [row] = await db.update(assets).set(data).where(and(eq(assets.id, id), eq(assets.companyId, companyId))).returning();
+  const userId = (c.get("user") as any)?.id;
+
+  if (before) {
+    // Track assignment changes
+    const oldEmp = before.assignedToEmployee;
+    const newEmp = row.assignedToEmployee;
+    if (oldEmp !== newEmp) {
+      if (oldEmp && !newEmp) {
+        // Unassigned (returned)
+        await logToolEvent({ companyId, assetId: id, eventType: "returned", employeeId: oldEmp, performedBy: userId });
+      } else if (!oldEmp && newEmp) {
+        // Newly assigned
+        await logToolEvent({ companyId, assetId: id, eventType: "assigned", employeeId: newEmp, jobId: row.assignedToJob, performedBy: userId });
+      } else if (oldEmp && newEmp) {
+        // Transferred
+        await logToolEvent({ companyId, assetId: id, eventType: "transferred", fromEmployeeId: oldEmp, toEmployeeId: newEmp, jobId: row.assignedToJob, performedBy: userId });
+      }
+    }
+    // Track status changes
+    if (before.status !== row.status) {
+      const eventType = row.status === "retired" ? "retired" : "status_changed";
+      await logToolEvent({ companyId, assetId: id, eventType, note: `${before.status} → ${row.status}`, performedBy: userId });
+    }
+    // Track condition changes
+    if (before.condition !== row.condition) {
+      await logToolEvent({ companyId, assetId: id, eventType: "condition_changed", note: `${before.condition} → ${row.condition}`, performedBy: userId });
+    }
+  }
+
   return c.json(row);
 });
 
@@ -1117,10 +1181,12 @@ api.get("/users", requireRole("admin"), async (c) => {
       username: users.username,
       displayName: users.displayName,
       role: users.role,
+      employeeId: users.employeeId,
       companyId: users.companyId,
       isActive: users.isActive,
       createdAt: users.createdAt,
       lastLogin: users.lastLogin,
+      employeeName: sql`(SELECT e.first_name || ' ' || e.last_name FROM employees e WHERE e.id = ${users.employeeId})`.as("employeeName"),
     })
     .from(users)
     .where(whereClause)
@@ -1130,27 +1196,29 @@ api.get("/users", requireRole("admin"), async (c) => {
 
 api.post("/users", requireRole("admin"), validate(UserSchema), async (c) => {
   const currentUser = c.get("user");
-  const { username, password, displayName, role, companyId } = c.get("validatedBody") || await c.req.json();
+  const { username, password, displayName, role, companyId, employeeId } = c.get("validatedBody") || await c.req.json();
   if (!username || !password || !displayName) {
     return c.json({ error: "All fields required" }, 400);
   }
-  // Only super_admin can create super_admin users
+  // Only super_admin can create super_admin or admin users
   if (role === "super_admin" && currentUser.role !== "super_admin") {
     return c.json({ error: "Only super admins can create super admin users" }, 403);
   }
+  // Non-super_admin always inherits their own companyId — cannot assign to other companies
   const hash = bcrypt.hashSync(password, 10);
-  const assignCompanyId = companyId || currentUser.companyId;
+  const assignCompanyId = currentUser.role === "super_admin" ? (companyId || currentUser.companyId) : currentUser.companyId;
   const [row] = await db
     .insert(users)
     .values({
       username: username.toLowerCase().trim(),
       passwordHash: hash,
       displayName,
-      role: role || "readonly",
+      role: role || "field_staff",
+      employeeId: employeeId || null,
       companyId: assignCompanyId,
     })
     .returning();
-  return c.json({ id: row.id, username: row.username, displayName: row.displayName, role: row.role, companyId: row.companyId }, 201);
+  return c.json({ id: row.id, username: row.username, displayName: row.displayName, role: row.role, employeeId: row.employeeId, companyId: row.companyId }, 201);
 });
 
 api.put("/users/:id", requireRole("admin"), async (c) => {
@@ -1161,6 +1229,10 @@ api.put("/users/:id", requireRole("admin"), async (c) => {
   // Don't allow password change through this endpoint
   delete data.passwordHash;
   delete data.password;
+  // Non-super_admin cannot change companyId
+  if (currentUser.role !== "super_admin") {
+    delete data.companyId;
+  }
   // Only super_admin can set role to super_admin
   if (data.role === "super_admin" && currentUser.role !== "super_admin") {
     return c.json({ error: "Only super admins can assign super admin role" }, 403);
@@ -1171,7 +1243,7 @@ api.put("/users/:id", requireRole("admin"), async (c) => {
 });
 
 // ── Company Logo Upload ─────────────────────────────────────────
-api.post("/logo", requireSuperAdmin(), async (c) => {
+api.post("/logo", requireRole("admin"), async (c) => {
   const companyId = getCompanyId(c);
   const body = await c.req.parseBody();
   const file = body["logo"];
@@ -1209,7 +1281,7 @@ api.post("/logo", requireSuperAdmin(), async (c) => {
 });
 
 // ── Settings (super_admin only — company name is locked) ─────────
-api.put("/settings", requireSuperAdmin(), async (c) => {
+api.put("/settings", requireRole("admin"), async (c) => {
   const companyId = getCompanyId(c);
   const data = await c.req.json(); // { key: value, key: value, ... }
   for (const [key, value] of Object.entries(data)) {
@@ -1255,6 +1327,52 @@ api.put("/companies/:id", requireSuperAdmin(), async (c) => {
   const data = await c.req.json();
   const [row] = await db.update(companies).set(data).where(eq(companies.id, id)).returning();
   return c.json(row);
+});
+
+// ── Job Codes (work type categories) ──────────────────────────
+api.get("/job-codes", async (c) => {
+  const companyId = getCompanyId(c);
+  const rows = await db.select().from(jobCodes)
+    .where(eq(jobCodes.companyId, companyId))
+    .orderBy(jobCodes.sortOrder, jobCodes.code);
+  return c.json(rows);
+});
+
+api.post("/job-codes", requireRole("admin", "pm"), async (c) => {
+  const companyId = getCompanyId(c);
+  const data = await c.req.json();
+  const [row] = await db.insert(jobCodes).values({
+    companyId,
+    code: data.code,
+    description: data.description,
+    sortOrder: data.sortOrder ?? 0,
+    isActive: data.isActive ?? true,
+  }).returning();
+  return c.json(row, 201);
+});
+
+api.put("/job-codes/:id", requireRole("admin", "pm"), async (c) => {
+  const companyId = getCompanyId(c);
+  const id = parseInt(c.req.param("id"));
+  const data = await c.req.json();
+  const [row] = await db.update(jobCodes)
+    .set({
+      code: data.code,
+      description: data.description,
+      sortOrder: data.sortOrder,
+      isActive: data.isActive,
+    })
+    .where(and(eq(jobCodes.id, id), eq(jobCodes.companyId, companyId)))
+    .returning();
+  return c.json(row);
+});
+
+api.delete("/job-codes/:id", requireRole("admin", "pm"), async (c) => {
+  const companyId = getCompanyId(c);
+  const id = parseInt(c.req.param("id"));
+  await db.delete(jobCodes)
+    .where(and(eq(jobCodes.id, id), eq(jobCodes.companyId, companyId)));
+  return c.json({ success: true });
 });
 
 export { api };

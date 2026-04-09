@@ -33,3 +33,5 @@ __pycache__/
 # IDE
 .vscode/
 .idea/
+
+vite.config.ts.timestamp-*.mjs
